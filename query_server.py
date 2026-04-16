@@ -53,10 +53,16 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
-
+def RunningLocally():
+    if 'WEBSITE_SITE_NAME' in os.environ or 'FUNCTIONS_WORKER_RUNTIME' in os.environ:
+        return False
+    else:
+        print("Logging info locally")
+        return True
+    
 # ── Config ────────────────────────────────────────────────────────────────────
 
-INDEX_STORAGE        = os.getenv("INDEX_STORAGE",    "./blobstorage/chatbot")
+INDEX_STORAGE        = ("." if RunningLocally() else "") + os.getenv("INDEX_STORAGE",    "/blobstorage/chatbot")
 INDEX_NAME           = os.getenv("INDEX_NAME",        "DigiUng_lab")
 SIMILARITY_TOP_K     = int(os.getenv("SIMILARITY_TOP_K",   "5"))
 SIMILARITY_CUTOFF    = float(os.getenv("SIMILARITY_CUTOFF", "0.3"))
