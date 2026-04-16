@@ -63,20 +63,23 @@ def running_locally() -> bool:
     return True
 
 _LOCAL = running_locally()
-
-# On Azure, files are deployed to /home/site/wwwroot/
-# Locally, paths are relative to the project root
-_BASE = os.path.dirname(os.path.abspath(__file__))
+_PREFIX = "." if _LOCAL else ""
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-INDEX_STORAGE        = os.path.join(_BASE, os.getenv("INDEX_STORAGE",    "blobstorage/chatbot"))
+INDEX_STORAGE        = _PREFIX + os.getenv("INDEX_STORAGE",    "/blobstorage/chatbot")
 INDEX_NAME           = os.getenv("INDEX_NAME",        "DigiUng_lab")
 SIMILARITY_TOP_K     = int(os.getenv("SIMILARITY_TOP_K",   "5"))
 SIMILARITY_CUTOFF    = float(os.getenv("SIMILARITY_CUTOFF", "0.3"))
-DOCUMENT_STORE_PATH  = os.path.join(_BASE, os.getenv("DOCUMENT_STORE_PATH", "utils/create_lab_vectorindex/document_store.json"))
 
-print(f"[config] BASE={_BASE}", flush=True)
+# DOCUMENT_STORE_PATH: set as env var on Azure, falls back to local relative path
+_doc_store_env = os.getenv("DOCUMENT_STORE_PATH")
+if _doc_store_env:
+    DOCUMENT_STORE_PATH = _doc_store_env
+else:
+    DOCUMENT_STORE_PATH = "./utils/create_lab_vectorindex/document_store.json"
+
+print(f"[config] LOCAL={_LOCAL}", flush=True)
 print(f"[config] INDEX_STORAGE={INDEX_STORAGE}", flush=True)
 print(f"[config] DOCUMENT_STORE_PATH={DOCUMENT_STORE_PATH}", flush=True)
 
