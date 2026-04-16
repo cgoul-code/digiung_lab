@@ -18,8 +18,10 @@ Endpoints:
 """
 
 import asyncio
+import json
 import logging
 import os
+import uuid
 from typing import Optional
 
 from dotenv import load_dotenv, find_dotenv
@@ -41,8 +43,11 @@ from llama_index.core.vector_stores import (
     FilterOperator,
     FilterCondition,
 )
+# Note: for multi-value OR within a field we nest MetadataFilters
 from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
 from llama_index.llms.azure_openai import AzureOpenAI
+from langchain_openai import AzureChatOpenAI
+from aggregate_workflow import aggregate_graph
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,7 +57,7 @@ logging.basicConfig(
 # ── Config ────────────────────────────────────────────────────────────────────
 
 INDEX_STORAGE        = os.getenv("INDEX_STORAGE",    "./blobstorage/chatbot")
-INDEX_NAME           = os.getenv("INDEX_NAME",        "lab")
+INDEX_NAME           = os.getenv("INDEX_NAME",        "DigiUng_lab")
 SIMILARITY_TOP_K     = int(os.getenv("SIMILARITY_TOP_K",   "5"))
 SIMILARITY_CUTOFF    = float(os.getenv("SIMILARITY_CUTOFF", "0.3"))
 DOCUMENT_STORE_PATH  = os.getenv("DOCUMENT_STORE_PATH", "./utils/create_lab_vectorindex/document_store.json")
@@ -90,6 +95,16 @@ Settings.llm = AzureOpenAI(
 
 Settings.text_splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=128)
 
+# LangChain LLM for LangGraph workflows (aggregate_workflow uses this)
+_langchain_llm = AzureChatOpenAI(
+    azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
+    api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+    temperature=0.0,
+    timeout=120,
+)
+
 # ── App setup ─────────────────────────────────────────────────────────────────
 
 app = Quart(__name__)
@@ -97,63 +112,121 @@ app = cors(app, allow_origin="*")
 
 _index: Optional[VectorStoreIndex] = None
 
+# ── Job store for async aggregate jobs ───────────────────────────────────────
+# job_id -> {"status": "running"|"done"|"error", "events": [...], "result": {...}}
+_jobs: dict = {}
+
 
 async def _load_index_async():
     global _index
     persist_dir = os.path.join(INDEX_STORAGE, INDEX_NAME)
+    print(f"[index] Loading from {persist_dir} ...", flush=True)
+
     if not os.path.isdir(persist_dir):
-        logging.error("Index not found at %s. Run ingest_pdfs.py first.", persist_dir)
+        print(f"[index] ERROR: directory not found: {persist_dir}", flush=True)
+        print(f"[index] Run ingest_pdfs.py first.", flush=True)
         return
 
     def _load():
+        print(f"[index] Reading storage context ...", flush=True)
         storage_context = StorageContext.from_defaults(persist_dir=persist_dir)
-        return load_index_from_storage(storage_context)
+        print(f"[index] Building index ...", flush=True)
+        idx = load_index_from_storage(storage_context)
+        print(f"[index] Index ready.", flush=True)
+        return idx
 
     loop = asyncio.get_event_loop()
-    _index = await loop.run_in_executor(None, _load)
-    logging.info("Index loaded from %s", persist_dir)
+    try:
+        _index = await loop.run_in_executor(None, _load)
+        print(f"[index] Loaded successfully from {persist_dir}", flush=True)
+    except Exception as e:
+        print(f"[index] FAILED to load: {e}", flush=True)
 
 
 @app.before_serving
 async def _spawn_loader_after_bind():
-    asyncio.create_task(_load_index_async())
-    logging.info("Scheduled index-loader via create_task; server is live.")
+    # Must return quickly — Hypercorn has a startup timeout.
+    # Schedule the index load as a background task and return immediately.
+    loop = asyncio.get_event_loop()
+    loop.create_task(_load_index_async())
+    print("[server] Server is live. Index loading in background...", flush=True)
 
 
 # ── Filter builder ────────────────────────────────────────────────────────────
 
-def _build_filters(filter_dict: dict) -> Optional[MetadataFilters]:
+def _parse_filter_dict(filter_dict: dict) -> tuple[dict, dict]:
     """
-    Build a LlamaIndex MetadataFilters object from a dict like:
-        {
-            "filename": "rapport.pdf",
-            "segment":  "Kriminalitet",
-            "publisert_arstall": 2023
-        }
-
-    All conditions are combined with AND.
-    Unknown fields are ignored with a warning.
+    Split filter_dict into:
+      - single_vals: {field: "value"}  → passed to LlamaIndex (AND, EQ)
+      - multi_vals:  {field: ["v1","v2"]} → applied in Python after retrieval (OR)
     """
-    if not filter_dict:
-        return None
-
-    conditions = []
+    single_vals = {}
+    multi_vals = {}
     for key, value in filter_dict.items():
         if key not in FILTERABLE_FIELDS:
             logging.warning("Ignoring unknown filter field: %s", key)
             continue
-        conditions.append(
-            MetadataFilter(
-                key=key,
-                value=value,
-                operator=FilterOperator.EQ,
-            )
-        )
+        values = [v.strip() for v in str(value).split(",") if v.strip()]
+        if not values:
+            continue
+        if len(values) == 1:
+            single_vals[key] = values[0]
+        else:
+            multi_vals[key] = values
+    return single_vals, multi_vals
 
-    if not conditions:
+
+def _build_filters(filter_dict: dict) -> Optional[MetadataFilters]:
+    """
+    Build LlamaIndex MetadataFilters for single-value fields only.
+    Multi-value fields are handled in Python by _apply_python_filters().
+    (LlamaIndex simple vector store does not support nested OR filters.)
+    """
+    if not filter_dict:
         return None
 
+    single_vals, _ = _parse_filter_dict(filter_dict)
+    if not single_vals:
+        return None
+
+    conditions = [
+        MetadataFilter(key=k, value=v, operator=FilterOperator.EQ)
+        for k, v in single_vals.items()
+    ]
     return MetadataFilters(filters=conditions, condition=FilterCondition.AND)
+
+
+def _apply_python_filters(nodes: list, filter_dict: dict) -> list:
+    """
+    Post-filter retrieved nodes for multi-value fields (OR logic per field).
+    All fields must match (AND across fields, OR within a field).
+    """
+    if not filter_dict:
+        return nodes
+
+    _, multi_vals = _parse_filter_dict(filter_dict)
+    if not multi_vals:
+        return nodes
+
+    # Debug: print what tittel values nodes actually have
+    for nws in nodes[:3]:
+        node = getattr(nws, "node", nws)
+        meta = getattr(node, "metadata", {}) or {}
+        print(f"[python_filter] node tittel={meta.get('tittel','')!r}", flush=True)
+
+    def node_matches(nws):
+        node = getattr(nws, "node", nws)
+        meta = getattr(node, "metadata", {}) or {}
+        for key, values in multi_vals.items():
+            node_val = str(meta.get(key, "") or "").strip()
+            node_val_lower = node_val.lower()
+            if not any(v.strip().lower() == node_val_lower for v in values):
+                return False
+        return True
+
+    filtered = [n for n in nodes if node_matches(n)]
+    print(f"[python_filter] {len(nodes)} → {len(filtered)} nodes after OR filter on {list(multi_vals.keys())}", flush=True)
+    return filtered
 
 
 # ── Document store endpoint ──────────────────────────────────────────────────
@@ -162,7 +235,7 @@ def _unique_sorted(entries, field):
     """Return sorted unique non-empty values for a field, splitting on ';'."""
     vals = set()
     for e in entries:
-        raw = (e.get(field) or "").strip()
+        raw = str(e.get(field) or "").strip()
         for part in raw.split(";"):
             part = part.strip()
             if part:
@@ -245,6 +318,7 @@ async def query():
         return jsonify({"error": "Index not loaded yet"}), 503
 
     body = await request.get_json(force=True)
+    print(f"[/query] Received body: {body}", flush=True)
     body = body or {}
 
     question = body.get("question", "").strip()
@@ -253,25 +327,42 @@ async def query():
 
     top_k   = int(body.get("top_k",  SIMILARITY_TOP_K))
     cutoff  = float(body.get("cutoff", SIMILARITY_CUTOFF))
+    params = _parse_aggregate_body(body)
+    print(f"[/query] filters: {params.get('filters')}", flush=True)
     filters = _build_filters(body.get("filters") or {})
+    print(f"[/query] built filters: {filters}", flush=True)
 
     if filters:
         logging.info("Applying filters: %s", body.get("filters"))
 
+    raw_filters = body.get("filters") or {}
+
     # ── Retrieve + synthesize in executor (LlamaIndex is sync) ───────────────
     def _run_query():
+        from llama_index.core.query_engine import RetrieverQueryEngine
+        from llama_index.core.response_synthesizers import get_response_synthesizer
+
+        # Step 1: retrieve candidates from index
+        # If no LlamaIndex filter (all fields are multi-value), fetch more nodes
+        # so the Python post-filter has enough candidates to work with
+        effective_top_k = top_k if filters else max(top_k * 10, 100)
+        print(f"[_run_query] effective_top_k={effective_top_k} filters={filters}", flush=True)
         retriever = _index.as_retriever(
-            similarity_top_k=top_k,
-            similarity_cutoff=cutoff,
-            filters=filters,
-        )
-        query_engine = _index.as_query_engine(
-            similarity_top_k=top_k,
-            similarity_cutoff=cutoff,
+            similarity_top_k=effective_top_k,
+            similarity_cutoff=0.0 if not filters else cutoff,
             filters=filters,
         )
         nodes_with_scores = retriever.retrieve(question)
-        response = query_engine.query(question)
+        print(f"[_run_query] retrieved {len(nodes_with_scores)} nodes before python filter", flush=True)
+
+        # Step 2: apply Python-side OR filter for multi-value fields
+        nodes_with_scores = _apply_python_filters(nodes_with_scores, raw_filters)
+
+        # Step 3: synthesize answer directly from the filtered nodes
+        # This ensures the LLM only sees the nodes we actually want
+        synthesizer = get_response_synthesizer()
+        response = synthesizer.synthesize(question, nodes=nodes_with_scores)
+
         return str(response), nodes_with_scores
 
     loop = asyncio.get_event_loop()
@@ -313,6 +404,99 @@ async def query():
         "filters":  body.get("filters") or {},
         "answer":   answer,
         "sources":  sources,
+    })
+
+
+def _parse_aggregate_body(body):
+    return {
+        "question":      body.get("question", "").strip(),
+        "query_type":    body.get("query_type", "problems"),
+        "n_personas":    int(body.get("n_personas", 3)),
+        "chunks_per_doc":int(body.get("chunks_per_doc", 4)),
+        "filters":       body.get("filters") or {},
+    }
+
+
+
+@app.post("/aggregate/stream")
+async def aggregate_stream():
+    """
+    Start an aggregate job and return a job_id.
+    The client then polls GET /aggregate/stream/<job_id> for progress events.
+    """
+    if _index is None:
+        return jsonify({"error": "Index not loaded yet"}), 503
+
+    raw = await request.get_data(as_text=True)
+    print(f"[/aggregate/stream] raw body: {raw[:500]}", flush=True)
+    try:
+        body = json.loads(raw) if raw else {}
+    except Exception as e:
+        print(f"[/aggregate/stream] JSON parse error: {e}", flush=True)
+        body = {}
+    print(f"[/aggregate/stream] parsed body: {body}", flush=True)
+    params = _parse_aggregate_body(body)
+    print(f"[/aggregate/stream] filters: {params.get('filters')}", flush=True)
+    if not params["question"]:
+        return jsonify({"error": "Missing 'question'"}), 400
+
+    job_id = str(uuid.uuid4())
+    _jobs[job_id] = {"status": "running", "events": [], "result": None}
+
+    loop = asyncio.get_event_loop()
+
+    def _emit_job(item):
+        if item is None:
+            return
+        _jobs[job_id]["events"].append(item)
+        if item.get("event") == "result":
+            _jobs[job_id]["status"] = "done"
+            _jobs[job_id]["result"] = item
+        elif item.get("event") == "error":
+            _jobs[job_id]["status"] = "error"
+
+    class QueueProxy:
+        def put_nowait(self, item): loop.call_soon_threadsafe(_emit_job, item)
+        def put(self, item):        loop.call_soon_threadsafe(_emit_job, item)
+
+    def _run():
+        try:
+            state = {**params,
+                "document_store_path": DOCUMENT_STORE_PATH,
+                "index": _index, "llm": _langchain_llm,
+                "documents": [], "per_doc_findings": [], "result": None,
+                "event_queue": QueueProxy(),
+            }
+            final = aggregate_graph.invoke(state)
+            loop.call_soon_threadsafe(_emit_job, {"event": "result", **(final["result"] or {})})
+        except Exception as e:
+            logging.error("[/aggregate/stream] failed: %s", e, exc_info=True)
+            loop.call_soon_threadsafe(_emit_job, {"event": "error", "message": str(e)})
+        finally:
+            _jobs[job_id]["status"] = _jobs[job_id].get("status", "done")
+
+    loop.run_in_executor(None, _run)
+
+    return jsonify({"job_id": job_id})
+
+
+@app.get("/aggregate/stream/<job_id>")
+async def aggregate_stream_poll(job_id):
+    """
+    Poll for job progress. Returns all events since last_index.
+    GET /aggregate/stream/<job_id>?last=0
+    """
+    job = _jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+
+    last = int(request.args.get("last", 0))
+    new_events = job["events"][last:]
+
+    return jsonify({
+        "status": job["status"],
+        "events": new_events,
+        "total":  len(job["events"]),
     })
 
 
