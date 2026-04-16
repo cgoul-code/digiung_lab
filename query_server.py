@@ -53,20 +53,25 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
-def RunningLocally():
+
+# ── Environment detection ─────────────────────────────────────────────────────
+
+def running_locally() -> bool:
     if 'WEBSITE_SITE_NAME' in os.environ or 'FUNCTIONS_WORKER_RUNTIME' in os.environ:
         return False
-    else:
-        print("Logging info locally")
-        return True
-    
+    print("Running locally", flush=True)
+    return True
+
+_LOCAL = running_locally()
+_PREFIX = "." if _LOCAL else ""
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
-INDEX_STORAGE        = ("." if RunningLocally() else "") + os.getenv("INDEX_STORAGE",    "/blobstorage/chatbot")
+INDEX_STORAGE        = _PREFIX + os.getenv("INDEX_STORAGE",    "/blobstorage/chatbot")
 INDEX_NAME           = os.getenv("INDEX_NAME",        "DigiUng_lab")
 SIMILARITY_TOP_K     = int(os.getenv("SIMILARITY_TOP_K",   "5"))
 SIMILARITY_CUTOFF    = float(os.getenv("SIMILARITY_CUTOFF", "0.3"))
-DOCUMENT_STORE_PATH  = os.getenv("DOCUMENT_STORE_PATH", "./utils/create_lab_vectorindex/document_store.json")
+DOCUMENT_STORE_PATH  = _PREFIX + os.getenv("DOCUMENT_STORE_PATH", "/utils/create_lab_vectorindex/document_store.json")
 
 # All metadata fields that can be filtered on
 FILTERABLE_FIELDS = {
@@ -160,14 +165,18 @@ async def _spawn_loader_after_bind():
 
 # ── Filter builder ────────────────────────────────────────────────────────────
 
-def _parse_filter_dict(filter_dict: dict) -> tuple[dict, dict]:
+def _build_filters(filter_dict: dict) -> Optional[MetadataFilters]:
     """
-    Split filter_dict into:
-      - single_vals: {field: "value"}  → passed to LlamaIndex (AND, EQ)
-      - multi_vals:  {field: ["v1","v2"]} → applied in Python after retrieval (OR)
+    Build LlamaIndex MetadataFilters.
+    - Single value per field  → EQ filter
+    - Multiple values (comma-joined) → OR group for that field
+    - Multiple fields → AND across fields
     """
-    single_vals = {}
-    multi_vals = {}
+    if not filter_dict:
+        return None
+
+    and_conditions = []
+
     for key, value in filter_dict.items():
         if key not in FILTERABLE_FIELDS:
             logging.warning("Ignoring unknown filter field: %s", key)
@@ -176,63 +185,26 @@ def _parse_filter_dict(filter_dict: dict) -> tuple[dict, dict]:
         if not values:
             continue
         if len(values) == 1:
-            single_vals[key] = values[0]
+            and_conditions.append(
+                MetadataFilter(key=key, value=values[0], operator=FilterOperator.EQ)
+            )
         else:
-            multi_vals[key] = values
-    return single_vals, multi_vals
+            # OR group within this field
+            and_conditions.append(
+                MetadataFilters(
+                    filters=[MetadataFilter(key=key, value=v) for v in values],
+                    condition=FilterCondition.OR,
+                )
+            )
 
-
-def _build_filters(filter_dict: dict) -> Optional[MetadataFilters]:
-    """
-    Build LlamaIndex MetadataFilters for single-value fields only.
-    Multi-value fields are handled in Python by _apply_python_filters().
-    (LlamaIndex simple vector store does not support nested OR filters.)
-    """
-    if not filter_dict:
+    if not and_conditions:
         return None
 
-    single_vals, _ = _parse_filter_dict(filter_dict)
-    if not single_vals:
-        return None
+    if len(and_conditions) == 1:
+        c = and_conditions[0]
+        return c if isinstance(c, MetadataFilters) else MetadataFilters(filters=[c], condition=FilterCondition.AND)
 
-    conditions = [
-        MetadataFilter(key=k, value=v, operator=FilterOperator.EQ)
-        for k, v in single_vals.items()
-    ]
-    return MetadataFilters(filters=conditions, condition=FilterCondition.AND)
-
-
-def _apply_python_filters(nodes: list, filter_dict: dict) -> list:
-    """
-    Post-filter retrieved nodes for multi-value fields (OR logic per field).
-    All fields must match (AND across fields, OR within a field).
-    """
-    if not filter_dict:
-        return nodes
-
-    _, multi_vals = _parse_filter_dict(filter_dict)
-    if not multi_vals:
-        return nodes
-
-    # Debug: print what tittel values nodes actually have
-    for nws in nodes[:3]:
-        node = getattr(nws, "node", nws)
-        meta = getattr(node, "metadata", {}) or {}
-        print(f"[python_filter] node tittel={meta.get('tittel','')!r}", flush=True)
-
-    def node_matches(nws):
-        node = getattr(nws, "node", nws)
-        meta = getattr(node, "metadata", {}) or {}
-        for key, values in multi_vals.items():
-            node_val = str(meta.get(key, "") or "").strip()
-            node_val_lower = node_val.lower()
-            if not any(v.strip().lower() == node_val_lower for v in values):
-                return False
-        return True
-
-    filtered = [n for n in nodes if node_matches(n)]
-    print(f"[python_filter] {len(nodes)} → {len(filtered)} nodes after OR filter on {list(multi_vals.keys())}", flush=True)
-    return filtered
+    return MetadataFilters(filters=and_conditions, condition=FilterCondition.AND)
 
 
 # ── Document store endpoint ──────────────────────────────────────────────────
@@ -341,31 +313,23 @@ async def query():
     if filters:
         logging.info("Applying filters: %s", body.get("filters"))
 
-    raw_filters = body.get("filters") or {}
-
     # ── Retrieve + synthesize in executor (LlamaIndex is sync) ───────────────
     def _run_query():
         from llama_index.core.query_engine import RetrieverQueryEngine
         from llama_index.core.response_synthesizers import get_response_synthesizer
 
-        # Step 1: retrieve candidates from index
-        # If no LlamaIndex filter (all fields are multi-value), fetch more nodes
-        # so the Python post-filter has enough candidates to work with
-        effective_top_k = top_k if filters else max(top_k * 10, 100)
-        print(f"[_run_query] effective_top_k={effective_top_k} filters={filters}", flush=True)
+        from llama_index.core.response_synthesizers import get_response_synthesizer
+
+        # Retrieve using LlamaIndex filters (supports OR natively)
         retriever = _index.as_retriever(
-            similarity_top_k=effective_top_k,
-            similarity_cutoff=0.0 if not filters else cutoff,
+            similarity_top_k=top_k,
+            similarity_cutoff=cutoff,
             filters=filters,
         )
         nodes_with_scores = retriever.retrieve(question)
-        print(f"[_run_query] retrieved {len(nodes_with_scores)} nodes before python filter", flush=True)
+        print(f"[_run_query] retrieved {len(nodes_with_scores)} nodes, filters={filters}", flush=True)
 
-        # Step 2: apply Python-side OR filter for multi-value fields
-        nodes_with_scores = _apply_python_filters(nodes_with_scores, raw_filters)
-
-        # Step 3: synthesize answer directly from the filtered nodes
-        # This ensures the LLM only sees the nodes we actually want
+        # Synthesize answer from the filtered nodes directly
         synthesizer = get_response_synthesizer()
         response = synthesizer.synthesize(question, nodes=nodes_with_scores)
 
