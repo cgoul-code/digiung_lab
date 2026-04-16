@@ -121,6 +121,7 @@ _langchain_llm = AzureChatOpenAI(
 app = Quart(__name__)
 app = cors(app, allow_origin="*")
 
+
 _index: Optional[VectorStoreIndex] = None
 
 # ── Job store for async aggregate jobs ───────────────────────────────────────
@@ -226,6 +227,7 @@ async def document_store_filter_options():
     Returns unique dropdown options derived from document_store.json.
     The client calls this once on startup to populate its filter dropdowns.
     """
+    print(f"[/document-store/filter-options] Called. Looking for {DOCUMENT_STORE_PATH} ...", flush=True)
     if not os.path.isfile(DOCUMENT_STORE_PATH):
         return jsonify({"error": f"document_store.json not found at {DOCUMENT_STORE_PATH}"}), 404
 
