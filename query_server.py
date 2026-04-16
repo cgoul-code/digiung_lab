@@ -63,15 +63,22 @@ def running_locally() -> bool:
     return True
 
 _LOCAL = running_locally()
-_PREFIX = "." if _LOCAL else ""
+
+# On Azure, files are deployed to /home/site/wwwroot/
+# Locally, paths are relative to the project root
+_BASE = os.path.dirname(os.path.abspath(__file__))
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-INDEX_STORAGE        = _PREFIX + os.getenv("INDEX_STORAGE",    "/blobstorage/chatbot")
+INDEX_STORAGE        = os.path.join(_BASE, os.getenv("INDEX_STORAGE",    "blobstorage/chatbot"))
 INDEX_NAME           = os.getenv("INDEX_NAME",        "DigiUng_lab")
 SIMILARITY_TOP_K     = int(os.getenv("SIMILARITY_TOP_K",   "5"))
 SIMILARITY_CUTOFF    = float(os.getenv("SIMILARITY_CUTOFF", "0.3"))
-DOCUMENT_STORE_PATH  = _PREFIX + os.getenv("DOCUMENT_STORE_PATH", "/utils/create_lab_vectorindex/document_store.json")
+DOCUMENT_STORE_PATH  = os.path.join(_BASE, os.getenv("DOCUMENT_STORE_PATH", "utils/create_lab_vectorindex/document_store.json"))
+
+print(f"[config] BASE={_BASE}", flush=True)
+print(f"[config] INDEX_STORAGE={INDEX_STORAGE}", flush=True)
+print(f"[config] DOCUMENT_STORE_PATH={DOCUMENT_STORE_PATH}", flush=True)
 
 # All metadata fields that can be filtered on
 FILTERABLE_FIELDS = {
@@ -120,7 +127,6 @@ _langchain_llm = AzureChatOpenAI(
 
 app = Quart(__name__)
 app = cors(app, allow_origin="*")
-
 
 _index: Optional[VectorStoreIndex] = None
 
@@ -227,7 +233,6 @@ async def document_store_filter_options():
     Returns unique dropdown options derived from document_store.json.
     The client calls this once on startup to populate its filter dropdowns.
     """
-    print(f"[/document-store/filter-options] Called. Looking for {DOCUMENT_STORE_PATH} ...", flush=True)
     if not os.path.isfile(DOCUMENT_STORE_PATH):
         return jsonify({"error": f"document_store.json not found at {DOCUMENT_STORE_PATH}"}), 404
 
