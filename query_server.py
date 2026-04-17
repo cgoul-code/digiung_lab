@@ -300,7 +300,17 @@ async def health():
 
 @app.get("/indexes")
 async def list_indexes():
-    return jsonify(sorted(_indexes.keys()))
+    if not os.path.isfile(DOCUMENT_STORE_PATH):
+        return jsonify([])
+    def _load():
+        with open(DOCUMENT_STORE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return sorted(data.keys()) if isinstance(data, dict) else []
+    loop = asyncio.get_event_loop()
+    try:
+        return jsonify(await loop.run_in_executor(None, _load))
+    except Exception:
+        return jsonify([])
 
 
 @app.get("/query-types")
