@@ -66,9 +66,11 @@ def _save_processed_doc_ids(storage: str, name: str, ids: set[str]) -> None:
 
 # ── Document store ────────────────────────────────────────────────────────────
 
-def _load_and_validate_document_store(json_path: str) -> list[dict]:
+def _load_and_validate_document_store(json_path: str, index_name: str) -> list[dict]:
     """
     Load document_store.json and verify every file listed actually exists.
+    Supports both the legacy flat-list format and the new dict-of-lists format:
+      {"IndexName": [...], "OtherIndex": [...]}
     Aborts with a clear error message if any file is missing.
     """
     if not os.path.isfile(json_path):
@@ -76,9 +78,20 @@ def _load_and_validate_document_store(json_path: str) -> list[dict]:
         sys.exit(1)
 
     with open(json_path, "r", encoding="utf-8") as f:
-        entries = json.load(f)
+        data = json.load(f)
 
-    logging.info("Loaded %d entries from %s", len(entries), json_path)
+    if isinstance(data, list):
+        entries = data
+    elif index_name in data:
+        entries = data[index_name]
+    else:
+        logging.error(
+            "Index '%s' not found in %s. Available: %s",
+            index_name, json_path, list(data.keys())
+        )
+        sys.exit(1)
+
+    logging.info("Loaded %d entries for index '%s' from %s", len(entries), index_name, json_path)
 
     missing = []
     for entry in entries:
@@ -161,7 +174,7 @@ def run_incremental_ingest(
     document_store_path: str,
 ):
     # Load + validate — fails here if any file is missing
-    entries = _load_and_validate_document_store(document_store_path)
+    entries = _load_and_validate_document_store(document_store_path, name)
 
     processed = _load_processed_doc_ids(storage, name)
     logging.info("Found %d entries in document store, %d already ingested", len(entries), len(processed))

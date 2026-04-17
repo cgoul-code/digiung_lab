@@ -44,7 +44,6 @@ from langgraph.graph import StateGraph, START, END
 #   output_key      — top-level key in the JSON response
 
 QUERY_TYPES = {
-
     "problems": {
         "extract_system": """Du er en faglig assistent som analyserer forskningsrapporter om barn og unge i Norge.
 Trekk ut konkrete problemer og utfordringer unge mennesker møter, basert på dokumentet du får.
@@ -173,6 +172,7 @@ class AggregateState(TypedDict):
     query_type: str                     # "problems" | "moments" | "personas" | "free"
     n_personas: int                     # only used for query_type="personas"
     document_store_path: str
+    index_name: str                     # key into document_store.json when format is a dict
     index: Any
     llm: Any
     chunks_per_doc: int
@@ -195,10 +195,30 @@ def _emit(state: AggregateState, event: dict):
             pass
 
 
-def load_documents(state: AggregateState) -> dict:
-    path = state["document_store_path"]
+def _read_doc_store_entries(path: str, index_name: str) -> list[dict]:
+    """Load entries from document_store.json.
+    Supports both the legacy flat-list format and the new dict-of-lists format:
+      {"IndexName": [...], "OtherIndex": [...]}
+    Falls back to returning all entries when index_name is not found.
+    """
     with open(path, "r", encoding="utf-8") as f:
-        entries = json.load(f)
+        data = json.load(f)
+    if isinstance(data, list):
+        return data
+    if index_name and index_name in data:
+        return data[index_name]
+    # index not found — return all entries across all indexes as fallback
+    all_entries = []
+    for entries in data.values():
+        if isinstance(entries, list):
+            all_entries.extend(entries)
+    return all_entries
+
+
+def load_documents(state: AggregateState) -> dict:
+    path       = state["document_store_path"]
+    index_name = state.get("index_name", "")
+    entries    = _read_doc_store_entries(path, index_name)
         
 
     filters = state.get("filters") or {}
@@ -209,7 +229,7 @@ def load_documents(state: AggregateState) -> dict:
                 entry_val = str(entry.get(key, "") or "").lower()
                 # Value may be comma-joined multi-select (e.g. "Tittel1,Tittel2")
                 # The entry matches if ANY of the selected values matches
-                selected = [v.strip().lower() for v in str(value).split(",") if v.strip()]
+                selected = [v.strip().lower() for v in str(value).split(";") if v.strip()]
                 if not any(sel == entry_val or sel in entry_val for sel in selected):
                     return False
             return True

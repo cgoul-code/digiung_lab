@@ -47,7 +47,7 @@ from llama_index.core.vector_stores import (
 from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
 from llama_index.llms.azure_openai import AzureOpenAI
 from langchain_openai import AzureChatOpenAI
-from aggregate_workflow import aggregate_graph
+from aggregate_workflow import aggregate_graph, QUERY_TYPES
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,21 +67,17 @@ _PREFIX = "." if _LOCAL else ""
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-INDEX_STORAGE        = _PREFIX + os.getenv("INDEX_STORAGE",    "/blobstorage/chatbot")
-INDEX_NAME           = os.getenv("INDEX_NAME",        "DigiUng_lab")
-SIMILARITY_TOP_K     = int(os.getenv("SIMILARITY_TOP_K",   "5"))
-SIMILARITY_CUTOFF    = float(os.getenv("SIMILARITY_CUTOFF", "0.3"))
+INDEX_STORAGE     = _PREFIX + os.getenv("INDEX_STORAGE", "/blobstorage/chatbot")
+SIMILARITY_TOP_K  = int(os.getenv("SIMILARITY_TOP_K",   "5"))
+SIMILARITY_CUTOFF = float(os.getenv("SIMILARITY_CUTOFF", "0.3"))
 
-# DOCUMENT_STORE_PATH: set as env var on Azure, falls back to local relative path
+# Fallback document store used when an index has no local document_store.json
 _doc_store_env = os.getenv("DOCUMENT_STORE_PATH")
-if _doc_store_env:
-    DOCUMENT_STORE_PATH = _doc_store_env
-else:
-    DOCUMENT_STORE_PATH = "./utils/create_lab_vectorindex/document_store.json"
+DOCUMENT_STORE_PATH = _doc_store_env or "./utils/create_lab_vectorindex/document_store.json"
 
 print(f"[config] LOCAL={_LOCAL}", flush=True)
 print(f"[config] INDEX_STORAGE={INDEX_STORAGE}", flush=True)
-print(f"[config] DOCUMENT_STORE_PATH={DOCUMENT_STORE_PATH}", flush=True)
+print(f"[config] DOCUMENT_STORE_PATH (fallback)={DOCUMENT_STORE_PATH}", flush=True)
 
 # All metadata fields that can be filtered on
 FILTERABLE_FIELDS = {
@@ -131,46 +127,81 @@ _langchain_llm = AzureChatOpenAI(
 app = Quart(__name__)
 app = cors(app, allow_origin="*")
 
-_index: Optional[VectorStoreIndex] = None
+# name -> {"index": VectorStoreIndex, "doc_store_path": str}
+_indexes: dict[str, dict] = {}
+
+
+def _read_doc_store_entries(doc_store_path: str, index_name: str) -> list[dict]:
+    """Load entries for a given index from document_store.json.
+    Supports legacy flat-list format and new dict-of-lists format:
+      {"IndexName": [...], "OtherIndex": [...]}
+    """
+    with open(doc_store_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, list):
+        return data
+    if index_name and index_name in data:
+        return data[index_name]
+    all_entries: list[dict] = []
+    for v in data.values():
+        if isinstance(v, list):
+            all_entries.extend(v)
+    return all_entries
 
 # ── Job store for async aggregate jobs ───────────────────────────────────────
 # job_id -> {"status": "running"|"done"|"error", "events": [...], "result": {...}}
 _jobs: dict = {}
 
 
-async def _load_index_async():
-    global _index
-    persist_dir = os.path.join(INDEX_STORAGE, INDEX_NAME)
-    print(f"[index] Loading from {persist_dir} ...", flush=True)
+def _resolve_index(name: Optional[str]):
+    """Return (index_name, entry) for the requested name, or the first loaded index as fallback."""
+    if name and name in _indexes:
+        return name, _indexes[name]
+    first = next(iter(_indexes), None)
+    return first, _indexes.get(first)
 
-    if not os.path.isdir(persist_dir):
-        print(f"[index] ERROR: directory not found: {persist_dir}", flush=True)
-        print(f"[index] Run ingest_pdfs.py first.", flush=True)
+
+async def _load_all_indexes_async():
+    global _indexes
+    if not os.path.isdir(INDEX_STORAGE):
+        print(f"[index] INDEX_STORAGE not found: {INDEX_STORAGE}", flush=True)
         return
 
-    def _load():
-        print(f"[index] Reading storage context ...", flush=True)
-        storage_context = StorageContext.from_defaults(persist_dir=persist_dir)
-        print(f"[index] Building index ...", flush=True)
-        idx = load_index_from_storage(storage_context)
-        print(f"[index] Index ready.", flush=True)
-        return idx
+    names = sorted(
+        n for n in os.listdir(INDEX_STORAGE)
+        if os.path.isfile(os.path.join(INDEX_STORAGE, n, "docstore.json"))
+    )
+    if not names:
+        print(f"[index] No indexes found under {INDEX_STORAGE}", flush=True)
+        return
 
     loop = asyncio.get_event_loop()
-    try:
-        _index = await loop.run_in_executor(None, _load)
-        print(f"[index] Loaded successfully from {persist_dir}", flush=True)
-    except Exception as e:
-        print(f"[index] FAILED to load: {e}", flush=True)
+    for name in names:
+        persist_dir = os.path.join(INDEX_STORAGE, name)
+        local_store = os.path.join(persist_dir, "document_store.json")
+        doc_store_path = local_store if os.path.isfile(local_store) else DOCUMENT_STORE_PATH
+
+        def _load(d=persist_dir, n=name):
+            print(f"[index] Loading '{n}' from {d} ...", flush=True)
+            ctx = StorageContext.from_defaults(persist_dir=d)
+            idx = load_index_from_storage(ctx)
+            print(f"[index] '{n}' ready.", flush=True)
+            return idx
+
+        try:
+            idx = await loop.run_in_executor(None, _load)
+            _indexes[name] = {"index": idx, "doc_store_path": doc_store_path}
+        except Exception as e:
+            print(f"[index] FAILED to load '{name}': {e}", flush=True)
+
+    print(f"[index] Loaded {len(_indexes)} index(es): {list(_indexes)}", flush=True)
 
 
 @app.before_serving
 async def _spawn_loader_after_bind():
-    # Must return quickly — Hypercorn has a startup timeout.
-    # Schedule the index load as a background task and return immediately.
     loop = asyncio.get_event_loop()
-    loop.create_task(_load_index_async())
-    print("[server] Server is live. Index loading in background...", flush=True)
+    loop.create_task(_load_all_indexes_async())
+    print("[server] Server is live. Indexes loading in background...", flush=True)
 
 
 # ── Filter builder ────────────────────────────────────────────────────────────
@@ -191,7 +222,7 @@ def _build_filters(filter_dict: dict) -> Optional[MetadataFilters]:
         if key not in FILTERABLE_FIELDS:
             logging.warning("Ignoring unknown filter field: %s", key)
             continue
-        values = [v.strip() for v in str(value).split(",") if v.strip()]
+        values = [v.strip() for v in str(value).split(";") if v.strip()]
         if not values:
             continue
         if len(values) == 1:
@@ -233,20 +264,20 @@ def _unique_sorted(entries, field):
 @app.get("/document-store/filter-options")
 async def document_store_filter_options():
     """
-    Returns unique dropdown options derived from document_store.json.
-    The client calls this once on startup to populate its filter dropdowns.
+    Returns unique dropdown options derived from the index's document_store.json.
+    Pass ?index_name=<name> to target a specific index.
     """
-    if not os.path.isfile(DOCUMENT_STORE_PATH):
-        return jsonify({"error": f"document_store.json not found at {DOCUMENT_STORE_PATH}"}), 404
+    req_index, entry = _resolve_index(request.args.get("index_name"))
+    doc_store_path = entry["doc_store_path"] if entry else DOCUMENT_STORE_PATH
 
-    def _load():
-        import json
-        with open(DOCUMENT_STORE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+    if not os.path.isfile(doc_store_path):
+        return jsonify({"error": f"document_store.json not found at {doc_store_path}"}), 404
 
     loop = asyncio.get_event_loop()
     try:
-        entries = await loop.run_in_executor(None, _load)
+        entries = await loop.run_in_executor(
+            None, _read_doc_store_entries, doc_store_path, req_index or ""
+        )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -264,21 +295,33 @@ async def document_store_filter_options():
 
 @app.get("/health")
 async def health():
-    return jsonify({"status": "ok", "index_loaded": _index is not None})
+    return jsonify({"status": "ok", "indexes_loaded": list(_indexes)})
+
+
+@app.get("/indexes")
+async def list_indexes():
+    return jsonify(sorted(_indexes.keys()))
+
+
+@app.get("/query-types")
+async def query_types():
+    return jsonify(QUERY_TYPES)
 
 
 @app.get("/index/info")
 async def index_info():
-    if _index is None:
-        return jsonify({"error": "Index not loaded yet"}), 503
-    try:
-        doc_count = len(_index.docstore.docs)
-    except Exception:
-        doc_count = -1
+    if not _indexes:
+        return jsonify({"error": "No indexes loaded yet"}), 503
+    result = {}
+    for name, entry in _indexes.items():
+        try:
+            doc_count = len(entry["index"].docstore.docs)
+        except Exception:
+            doc_count = -1
+        result[name] = {"document_chunks": doc_count}
     return jsonify({
-        "index_name":      INDEX_NAME,
-        "storage":         INDEX_STORAGE,
-        "document_chunks": doc_count,
+        "storage":           INDEX_STORAGE,
+        "indexes":           result,
         "filterable_fields": sorted(FILTERABLE_FIELDS),
     })
 
@@ -302,12 +345,13 @@ async def query():
             }
         }
     """
-    if _index is None:
-        return jsonify({"error": "Index not loaded yet"}), 503
-
     body = await request.get_json(force=True)
     print(f"[/query] Received body: {body}", flush=True)
     body = body or {}
+
+    index_name, entry = _resolve_index(body.get("index_name"))
+    if not entry:
+        return jsonify({"error": "No indexes loaded yet"}), 503
 
     question = body.get("question", "").strip()
     if not question:
@@ -315,23 +359,14 @@ async def query():
 
     top_k   = int(body.get("top_k",  SIMILARITY_TOP_K))
     cutoff  = float(body.get("cutoff", SIMILARITY_CUTOFF))
-    params = _parse_aggregate_body(body)
-    print(f"[/query] filters: {params.get('filters')}", flush=True)
     filters = _build_filters(body.get("filters") or {})
-    print(f"[/query] built filters: {filters}", flush=True)
-
-    if filters:
-        logging.info("Applying filters: %s", body.get("filters"))
+    print(f"[/query] index={index_name} filters={filters}", flush=True)
 
     # ── Retrieve + synthesize in executor (LlamaIndex is sync) ───────────────
     def _run_query():
-        from llama_index.core.query_engine import RetrieverQueryEngine
         from llama_index.core.response_synthesizers import get_response_synthesizer
 
-        from llama_index.core.response_synthesizers import get_response_synthesizer
-
-        # Retrieve using LlamaIndex filters (supports OR natively)
-        retriever = _index.as_retriever(
+        retriever = entry["index"].as_retriever(
             similarity_top_k=top_k,
             similarity_cutoff=cutoff,
             filters=filters,
@@ -394,6 +429,7 @@ def _parse_aggregate_body(body):
         "n_personas":    int(body.get("n_personas", 3)),
         "chunks_per_doc":int(body.get("chunks_per_doc", 4)),
         "filters":       body.get("filters") or {},
+        "index_name":    body.get("index_name", ""),
     }
 
 
@@ -404,9 +440,6 @@ async def aggregate_stream():
     Start an aggregate job and return a job_id.
     The client then polls GET /aggregate/stream/<job_id> for progress events.
     """
-    if _index is None:
-        return jsonify({"error": "Index not loaded yet"}), 503
-
     raw = await request.get_data(as_text=True)
     print(f"[/aggregate/stream] raw body: {raw[:500]}", flush=True)
     try:
@@ -416,7 +449,12 @@ async def aggregate_stream():
         body = {}
     print(f"[/aggregate/stream] parsed body: {body}", flush=True)
     params = _parse_aggregate_body(body)
-    print(f"[/aggregate/stream] filters: {params.get('filters')}", flush=True)
+
+    index_name, entry = _resolve_index(params.get("index_name"))
+    if not entry:
+        return jsonify({"error": "No indexes loaded yet"}), 503
+
+    print(f"[/aggregate/stream] index={index_name} filters={params.get('filters')}", flush=True)
     if not params["question"]:
         return jsonify({"error": "Missing 'question'"}), 400
 
@@ -442,8 +480,9 @@ async def aggregate_stream():
     def _run():
         try:
             state = {**params,
-                "document_store_path": DOCUMENT_STORE_PATH,
-                "index": _index, "llm": _langchain_llm,
+                "document_store_path": entry["doc_store_path"],
+                "index_name": index_name,
+                "index": entry["index"], "llm": _langchain_llm,
                 "documents": [], "per_doc_findings": [], "result": None,
                 "event_queue": QueueProxy(),
             }
@@ -472,12 +511,20 @@ async def aggregate_stream_poll(job_id):
 
     last = int(request.args.get("last", 0))
     new_events = job["events"][last:]
+    status = job["status"]
+    total  = len(job["events"])
 
-    return jsonify({
-        "status": job["status"],
+    response = jsonify({
+        "status": status,
         "events": new_events,
-        "total":  len(job["events"]),
+        "total":  total,
     })
+
+    # Clean up once the client has caught up with a finished job
+    if status in ("done", "error") and last >= total:
+        _jobs.pop(job_id, None)
+
+    return response
 
 
 if __name__ == "__main__":
