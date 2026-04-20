@@ -28,7 +28,7 @@ from llama_index.core import (
 from llama_index.core.schema import Document
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
-from llama_index.readers.file import PDFReader
+from llama_index.readers.file import PDFReader, PptxReader
 
 logging.basicConfig(
     level=logging.INFO,
@@ -144,7 +144,11 @@ def load_entry_as_documents(entry: dict) -> list[Document]:
     filnavn = entry.get("filnavn", "")
     pdf_path = Path(filnavn.replace("\\", os.sep))
 
-    reader = PDFReader()
+    suffix = pdf_path.suffix.lower()
+    if suffix in (".pptx", ".ppt"):
+        reader = PptxReader()
+    else:
+        reader = PDFReader()
     pages: list[Document] = reader.load_data(file=pdf_path)
 
     for page_doc in pages:

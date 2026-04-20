@@ -352,5 +352,51 @@
     "oppsummering": "Rapporten gir unik, direkte innsikt i hvordan personer som søker, bruker og produserer CSAM opererer i det digitale økosystemet. Den bygger på en stor, anonym spørreundersøkelse rettet mot aktive CSAM søkere, med mål om å:\n•\tforstå hvordan CSAM oppdages og konsumeres,\n•\tanalysere hvilken rolle plattformdesign og teknologi spiller,\n•\tidentifisere effektive forebyggings- og avbrytningstiltak.\n\nHovedfunn: Tidlig og ofte utilsiktet eksponering (mest aktuelt for oss)\n•\tTidlig debut er vanlig: \no\t13 % hadde sett CSAM innen 10 årsalder.\no\t59 % hadde sett CSAM før de fylte 18 år.\n•\tNesten halvparten (46 %) ble først eksponert utilsiktet, ofte via: \no\tsosiale medier,\no\tmeldingsapper,\no\tåpne nettsider.\nFor mange utviklet utilsiktet eksponering seg raskt til aktiv og målrettet søking. Implikasjon er at barndom og tidlig ungdom er kritiske faser for forebygging. Utilsiktet eksponering fungerer ofte som inngangsport.\nAI endrer CSAM landskapet dramatisk- AI senker terskelen for produksjon, øker volumet dramatisk og skaler nye etiske og juridiske blindsoner. \n\n\nHvordan forebygge utilsiktet eksponering:\nRapporten dokumenterer tre avgjørende mekanismer:\n1.\tBarn eksponeres før de har utviklet kritisk forståelse av seksualitet, grenser og skade.\n2.\tEksponeringen skjer ofte uten intensjon – via algoritmer, deling, søk, meldinger eller venner.\n3.\tTidlig eksponering øker risikoen for: \no\tnormalisering,\no\tseksuell forvirring,\no\tsenere aktiv og målrettet søking.\n\nTre overordnede grep:\n-\tREDUSERE UØNSKET EKSPONERING\n-\tBRYTE INNGANGSPORT-EFFEKTEN TIDLIG (klassisk helseforebygging/aldersverifisering og aldersgrenser)\no\tNasjonale førstehjelpsrammer for digital seksuell eksponering (utabeide en nasjonal responsstandard for når  unge ser algoritmer de ukke skulle sett)- tryggprat?\no\tAlderstilpasset, helhetlig seksualitetsundervisning\n\n-\tSKAPE TRYGGE UTGANGER\no\tLavterskel hjelpetilbud også for unge som er “nysgjerrige” (Tryggprat)\no\t\n\nPrinsipielt: Barns utilsiktede eksponering for overgrepsmateriale er et systemsviktproblem, ikke et foreldresviktproblem.\n",
     "filnavn": "data\\digiung_lab\\CSAMPerpetrator researsh report_Protect Children 2026.pdf"
   }
-]
+], 
+  "PSA_SSA": [
+    {
+      "tittel": "Ungdom og seksuell helse",
+      "publisert_arstall": 2026,
+      "publisert_av": "Mindshare",
+      "type_kilde": "Kvantitativ brukerundersøkelse",
+      "malgruppe": "Ungdom 13 - 19 år",
+      "antall_deltakere": "506",
+      "segment": "Seksuell helse",
+      "oppsummering": "Undersøkelsen er en pretest for Helsedirektoratet gjennomført blant 506 ungdommer i alderen 13–19 år, og viser at skole/undervisning er den klart viktigste kilden til informasjon om seksuell helse, samtidig som denne kilden også har høyest tillit. Ungdommene rapporterer generelt høy kjennskap til sentrale begreper som samtykke og grensesetting, og et stort flertall tar tydelig avstand fra grenseoverskridende handlinger som deling av intime bilder uten samtykke og press til seksuell aktivitet. Samtidig oppgir bare 41 prosent at de føler seg sikre på egen kunnskap om seksuell helse, og 15 prosent sier at de har opplevd å føle seg presset eller ukomfortable i en seksuell situasjon, med høyest andel blant jenter 15–19 år. Når det gjelder digitale tilbud, sier 61 prosent at de ville vært komfortable med å bruke en app for å lære mer om seksuell helse, og det viktigste for dem er at appen er gratis, anonym og utviklet av en troverdig aktør. Bruken av AI til spørsmål om seksuell helse er foreløpig relativt begrenset, men blant dem som vurderer en slik løsning, er anonymitet, pålitelighet og tydelige kilder de klart viktigste egenskapene.",
+      "filnavn": "data\\PSA_SSA\\HDIR_PSA_SAA_Pretest_Ungdom og seksuell_helse_2025.pdf"
+    },
+    {
+      "tittel": "Brukertest Skamløs",
+      "publisert_arstall": 2026,
+      "publisert_av": "Opinion",
+      "type_kilde": "Kvalitativ brukerundersøkelse",
+      "malgruppe": null,
+      "antall_deltakere": "8",
+      "segment": "Seksuell helse",
+      "oppsummering": "Brukertest av Skamløs er en kvalitativ rapport fra Opinion, gjennomført for Helsedirektoratet i januar–februar 2026. Åtte VG1- og VG2-elever (16–18 år) testet appen «Skamløs» – en tegneseriebasert app om seksuell helse – gjennom digitale dybdeintervjuer på 60–75 minutter. Overordnet er ungdommene positive til ideen: appen treffer godt med sitt digitale, individuelle format og gjør det tryggere å utforske vanskelige temaer. Det visuelle uttrykket og fargebruken liker de godt. Samtidig peker testen på flere forbedringsområder: spill-elementene oppleves lite intuitive og forstyrrende, tematikken er kjent fra skolen og oppleves ikke som ny, og karakterene Jonas og Anna fremstår som urealistisk naive. Språket og sjargongen beskrives som for «voksent» og konstruert – med emojis med komma og store bokstaver som bryter med hvordan unge faktisk skriver. Det er bred enighet om at Skamløs passer best som læringsverktøy i skolen, heller enn som en app ungdom ville lastet ned på eget initiativ.",
+      "filnavn": "data\\PSA_SSA\\Brukertest Skamløs_rapport fra Opinion 250226.pptx"
+    },
+    {
+      "tittel": "Brukertest KI-bot til HEI 2.0.",
+      "publisert_arstall": 2026,
+      "publisert_av": "Opinion",
+      "type_kilde": "Kvalitativ brukerundersøkelse",
+      "malgruppe": "Ungdom 13-20 år",
+      "antall_deltakere": "35",
+      "segment": "Seksuell helse",
+      "oppsummering": "Kvalitativ test av KI-løsningen i «Hva er innafor» 2.0 er en rapport fra Opinion, gjennomført for Helsedirektoratet i februar 2026. 35 ungdommer i alderen 13–15 år testet en KI-chatbot om temaer knyttet til forelskelse, kropp og seksualitet, gjennom digitale gruppechatter uten kamera eller mikrofon – for å ivareta anonymitet. Overordnet er ungdommene positive til ideen: de beskriver chatboten som en «digital anonym helsesøster» og setter pris på at Helsedirektoratet står bak, noe som gir dem en forventning om troverdige svar og full anonymitet. Selve brukeropplevelsen er imidlertid mer blandet. Svarene oppleves som for korte og generelle, designet beskrives som kjedelig og «legekontor-aktig», og tonen som for robotaktig – særlig jentene savner mer empati og en mer samtalebasert dialog. Ungdommene sammenlikner løsningen direkte med Chat-GPT, og forventer samme grad av personlig tilpasning. Det viktigste enkeltfunnet er at trygghet og pålitelig avsender ikke er nok til å drive bruk i seg selv – det er kvaliteten på svarene som avgjør om de vil bruke løsningen. Rapporten anbefaler at Helsedirektoratet tydeliggjør hva som skiller løsningen fra generative KI-modeller, nemlig at svarene er basert på faglig kvalitetssikrede tekster skrevet av mennesker.",
+      "filnavn": "data\\PSA_SSA\\Hdir_HEI 2.0 KI-bot_rapport.pdf"
+    },
+    {
+      "tittel": "CSAM Perpetrator Research Report – Findings from a Survey of CSAM Perpetrators on Digital Platform Use and Design",
+      "publisert_arstall": 2026,
+      "publisert_av": "Protect Children",
+      "type_kilde": "Kvantitativ brukerundersøkelse",
+      "malgruppe": "18-24 år",
+      "antall_deltakere": "20000",
+      "segment": "Seksuell helse",
+      "oppsummering": "Rapporten gir unik, direkte innsikt i hvordan personer som søker, bruker og produserer CSAM opererer i det digitale økosystemet. Den bygger på en stor, anonym spørreundersøkelse rettet mot aktive CSAM‑søkere, med mål om å: forstå hvordan CSAM oppdages og konsumeres, analysere hvilken rolle plattformdesign og teknologi spiller, identifisere effektive forebyggings- og avbrytningstiltak. Hovedfunn : Tidlig og ofte utilsiktet eksponering (mest aktuelt for oss) Tidlig debut er vanlig: 13 % hadde sett CSAM innen 10‑årsalder . 59 % hadde sett CSAM før de fylte 18 år. Nesten halvparten (46 %) ble først eksponert utilsiktet, ofte via: sosiale medier, meldingsapper, åpne nettsider. For mange utviklet utilsiktet eksponering seg raskt til aktiv og målrettet søking. Implikasjon er at barndom og tidlig ungdom er kritiske faser for forebygging. Utilsiktet eksponering fungerer ofte som inngangsport. AI endrer CSAM‑landskapet dramatisk- AI senker terskelen for produksjon, øker volumet dramatisk og skaler nye etiske og juridiske blindsoner. Hvordan forebygge utilsiktet eksponering: Rapporten dokumenterer tre avgjørende mekanismer: Barn eksponeres før de har utviklet kritisk forståelse av seksualitet, grenser og skade. Eksponeringen skjer ofte uten intensjon – via algoritmer, deling, søk, meldinger eller venner. Tidlig eksponering øker risikoen for: normalisering, seksuell forvirring, senere aktiv og målrettet søking. Tre overordnede grep: REDUSERE UØNSKET EKSPONERING BRYTE INNGANGSPORT-EFFEKTEN TIDLIG (klassisk helseforebygging/aldersverifisering og aldersgrenser) Nasjonale førstehjelpsrammer for digital seksuell eksponering (utabeide en nasjonal responsstandard for når  unge ser algoritmer de ukke skulle sett)- tryggprat? Alderstilpasset, helhetlig seksualitetsundervisning SKAPE TRYGGE UTGANGER Lavterskel hjelpetilbud også for unge som er “nysgjerrige” (Tryggprat) Prinsipielt: Barns utilsiktede eksponering for overgrepsmateriale er et systemsviktproblem, ikke et foreldresviktproblem.",
+      "filnavn": "data\\PSA_SSA\\CSAMPerpetrator researsh report_Protect Children 2026.pdf"
+    }
+  ]
 }

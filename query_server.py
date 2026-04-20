@@ -83,14 +83,12 @@ print(f"[config] DOCUMENT_STORE_PATH (fallback)={DOCUMENT_STORE_PATH}", flush=Tr
 
 # All metadata fields that can be filtered on
 FILTERABLE_FIELDS = {
-    "filename",
     "tittel",
+    "segment",
+    "antall_deltakere",
+    "malgruppe",
     "publisert_av",
     "type_kilde",
-    "malgruppe",
-    "segment",
-    "publisert_arstall",
-    "antall_deltakere",
 }
 
 # ── LlamaIndex models ─────────────────────────────────────────────────────────
@@ -157,9 +155,12 @@ _jobs: dict = {}
 
 def _resolve_index(name: Optional[str]):
     """Return (index_name, entry) for the requested name, or the first loaded index as fallback."""
+    print(f"[_resolve_index] requested name: {name}, available indexes: {list(_indexes)}", flush=True)
     if name and name in _indexes:
+        print(f"[_resolve_index] resolved to index: {name}", flush=True)
         return name, _indexes[name]
     first = next(iter(_indexes), None)
+    print(f"[_resolve_index] falling back to first index: {first}", flush=True)
     return first, _indexes.get(first)
 
 
@@ -278,7 +279,8 @@ async def document_store_filter_options():
     """
     req_index, entry = _resolve_index(request.args.get("index_name"))
     doc_store_path = entry["doc_store_path"] if entry else DOCUMENT_STORE_PATH
-
+    print(f"[/document-store/filter-options] index={req_index} doc_store_path={doc_store_path}", flush=True)
+    
     if not os.path.isfile(doc_store_path):
         return jsonify({"error": f"document_store.json not found at {doc_store_path}"}), 404
 
@@ -290,14 +292,18 @@ async def document_store_filter_options():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-    return jsonify({
-        "tittel":            _unique_sorted(entries, "tittel"),
-        "publisert_av":      _unique_sorted(entries, "publisert_av"),
-        "segment":           _unique_sorted(entries, "segment"),
-        "type_kilde":        _unique_sorted(entries, "type_kilde"),
-        "malgruppe":         _unique_sorted(entries, "malgruppe"),
-        "publisert_arstall": _unique_sorted(entries, "publisert_arstall"),
-    })
+    result = {}
+    for key in sorted(FILTERABLE_FIELDS):
+        vals = _unique_sorted(entries, key)
+        if vals:
+            result[key] = vals
+
+    skip_keys = {"text", "excerpt", "chunk_id", "file_path", "doc_id", "page_label"}
+    result["_entries"] = [
+        {k: v for k, v in e.items() if k not in skip_keys}
+        for e in entries
+    ]
+    return jsonify(result)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -559,6 +565,12 @@ async def aggregate_stream_poll(job_id):
     })
 
 
+def _xml_safe(text) -> str:
+    """Remove characters invalid in XML 1.0 (NULL bytes and control chars)."""
+    import re
+    return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', str(text or ''))
+
+
 def _generate_report_docx(result: dict) -> bytes:
     from docx import Document
 
@@ -570,7 +582,7 @@ def _generate_report_docx(result: dict) -> bytes:
     items   = result.get(OUTPUT_KEYS.get(qt, "findings"), [])
     per_doc = result.get("per_doc_findings", [])
 
-    doc.add_heading(result.get("question", "Rapport"), level=1)
+    doc.add_heading(_xml_safe(result.get("question", "Rapport")), level=1)
 
     meta = doc.add_paragraph()
     meta.add_run(f"Query type: {qt}").bold = True
@@ -586,31 +598,31 @@ def _generate_report_docx(result: dict) -> bytes:
     if items:
         doc.add_heading("Aggregerte funn", level=2)
         for item in items:
-            doc.add_heading(item.get("label", ""), level=3)
+            doc.add_heading(_xml_safe(item.get("label", "")), level=3)
             if item.get("description"):
-                doc.add_paragraph(item["description"])
+                doc.add_paragraph(_xml_safe(item["description"]))
             for challenge in item.get("challenges") or []:
-                doc.add_paragraph(challenge, style="List Bullet")
+                doc.add_paragraph(_xml_safe(challenge), style="List Bullet")
             if item.get("needs"):
                 doc.add_paragraph("Behov:").runs[0].bold = True
                 for need in item["needs"]:
-                    doc.add_paragraph(need, style="List Bullet")
+                    doc.add_paragraph(_xml_safe(need), style="List Bullet")
             if item.get("sources"):
                 p = doc.add_paragraph("Kilder: ")
-                p.add_run("; ".join(item["sources"])).italic = True
+                p.add_run("; ".join(_xml_safe(s) for s in item["sources"])).italic = True
 
     if per_doc:
         doc.add_heading("Funn per dokument", level=2)
         for entry in per_doc:
-            doc.add_heading(entry.get("tittel") or entry.get("filename", ""), level=3)
+            doc.add_heading(_xml_safe(entry.get("tittel") or entry.get("filename", "")), level=3)
             for finding in entry.get("findings", []):
-                doc.add_paragraph(finding, style="List Bullet")
+                doc.add_paragraph(_xml_safe(finding), style="List Bullet")
             chunks = entry.get("chunks") or []
             if chunks:
                 doc.add_paragraph("Kildehenvisninger:", style="Intense Quote")
                 for chunk in chunks:
                     page = chunk.get("page")
-                    excerpt = (chunk.get("excerpt") or "").strip()
+                    excerpt = _xml_safe((chunk.get("excerpt") or "").strip())
                     label = f"[Side {page}]  " if page is not None else ""
                     p = doc.add_paragraph(style="List Bullet 2")
                     if label:
