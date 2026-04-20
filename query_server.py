@@ -169,6 +169,7 @@ async def _load_all_indexes_async():
     if not os.path.isdir(INDEX_STORAGE):
         print(f"[index] INDEX_STORAGE not found: {INDEX_STORAGE}", flush=True)
         return
+    print(f"[index] Loading indexes from {INDEX_STORAGE} ...", flush=True)
 
     # Derive the list of index names from document_store.json keys only
     if os.path.isfile(DOCUMENT_STORE_PATH):
@@ -177,10 +178,14 @@ async def _load_all_indexes_async():
         names = sorted(_ds.keys()) if isinstance(_ds, dict) else []
     else:
         names = []
+    
+    print(f"[index] Found index names in document_store.json: {names}", flush=True)
 
     # Filter to those that actually have a built index on disk
     names = [n for n in names if os.path.isfile(os.path.join(INDEX_STORAGE, n, "docstore.json"))]
 
+    print(f"[index] Indexes with on-disk data: {names}", flush=True)
+    
     if not names:
         print(f"[index] No matching indexes found in {DOCUMENT_STORE_PATH} / {INDEX_STORAGE}", flush=True)
         return
