@@ -169,12 +169,19 @@ async def _load_all_indexes_async():
         print(f"[index] INDEX_STORAGE not found: {INDEX_STORAGE}", flush=True)
         return
 
-    names = sorted(
-        n for n in os.listdir(INDEX_STORAGE)
-        if os.path.isfile(os.path.join(INDEX_STORAGE, n, "docstore.json"))
-    )
+    # Derive the list of index names from document_store.json keys only
+    if os.path.isfile(DOCUMENT_STORE_PATH):
+        with open(DOCUMENT_STORE_PATH, "r", encoding="utf-8") as _f:
+            _ds = json.load(_f)
+        names = sorted(_ds.keys()) if isinstance(_ds, dict) else []
+    else:
+        names = []
+
+    # Filter to those that actually have a built index on disk
+    names = [n for n in names if os.path.isfile(os.path.join(INDEX_STORAGE, n, "docstore.json"))]
+
     if not names:
-        print(f"[index] No indexes found under {INDEX_STORAGE}", flush=True)
+        print(f"[index] No matching indexes found in {DOCUMENT_STORE_PATH} / {INDEX_STORAGE}", flush=True)
         return
 
     loop = asyncio.get_event_loop()
