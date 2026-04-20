@@ -162,10 +162,15 @@ Gi et strukturert svar på spørsmålet.""",
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
+class ChunkRef(BaseModel):
+    page:    Optional[int] = None
+    excerpt: str           = ""
+
 class DocFindings(BaseModel):
-    tittel: str
+    tittel:   str
     filename: str
-    findings: list[str] = Field(default_factory=list)
+    findings: list[str]      = Field(default_factory=list)
+    chunks:   list[ChunkRef] = Field(default_factory=list)
 
 class AggregateState(TypedDict):
     question: str
@@ -298,10 +303,19 @@ def extract_per_document(state: AggregateState) -> dict:
             print(f"  ↳ No chunks found — skipping", flush=True)
             continue
 
-        context = "\n\n".join(
-            (getattr(getattr(n, "node", n), "text", "") or "")[:800]
-            for n in nodes
-        ).strip()
+        chunks = []
+        context_parts = []
+        for n in nodes:
+            node = getattr(n, "node", n)
+            meta = getattr(node, "metadata", {}) or {}
+            text = (getattr(node, "text", "") or "").strip()
+            raw_page = meta.get("page_label") or meta.get("page")
+            chunks.append(ChunkRef(
+                page=int(raw_page) if raw_page is not None else None,
+                excerpt=text[:600],
+            ))
+            context_parts.append(text[:800])
+        context = "\n\n".join(context_parts).strip()
 
         if not context:
             print(f"  ↳ Chunks were empty — skipping", flush=True)
@@ -356,6 +370,7 @@ def extract_per_document(state: AggregateState) -> dict:
                 tittel=tittel,
                 filename=filename,
                 findings=findings,
+                chunks=chunks,
             ))
             logging.info("[aggregate] %d findings from: %s", len(findings), tittel)
 

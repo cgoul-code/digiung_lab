@@ -18,10 +18,12 @@ Endpoints:
 """
 
 import asyncio
+import datetime
 import json
 import logging
 import os
 import uuid
+from io import BytesIO
 from typing import Optional
 
 from dotenv import load_dotenv, find_dotenv
@@ -497,7 +499,22 @@ async def aggregate_stream():
                 "event_queue": QueueProxy(),
             }
             final = aggregate_graph.invoke(state)
-            loop.call_soon_threadsafe(_emit_job, {"event": "result", **(final["result"] or {})})
+            per_doc = [
+                {
+                    "tittel":    f.tittel,
+                    "filename":  f.filename,
+                    "findings":  f.findings,
+                    "chunks":    [{"page": c.page, "excerpt": c.excerpt} for c in f.chunks],
+                }
+                for f in (final.get("per_doc_findings") or [])
+                if f.findings
+            ]
+            loop.call_soon_threadsafe(_emit_job, {
+                "event":            "result",
+                **(final["result"] or {}),
+                "index_name":       index_name,
+                "per_doc_findings": per_doc,
+            })
         except Exception as e:
             logging.error("[/aggregate/stream] failed: %s", e, exc_info=True)
             loop.call_soon_threadsafe(_emit_job, {"event": "error", "message": str(e)})
@@ -524,17 +541,106 @@ async def aggregate_stream_poll(job_id):
     status = job["status"]
     total  = len(job["events"])
 
-    response = jsonify({
+    # Clean up error jobs immediately; done jobs are kept until report is downloaded
+    if status == "error" and last >= total:
+        _jobs.pop(job_id, None)
+
+    return jsonify({
         "status": status,
         "events": new_events,
         "total":  total,
     })
 
-    # Clean up once the client has caught up with a finished job
-    if status in ("done", "error") and last >= total:
-        _jobs.pop(job_id, None)
 
-    return response
+def _generate_report_docx(result: dict) -> bytes:
+    from docx import Document
+
+    OUTPUT_KEYS = {"problems": "problems", "moments": "moments", "personas": "personas", "free": "findings"}
+
+    doc     = Document()
+    qt      = result.get("query_type", "")
+    idx     = result.get("index_name", "")
+    items   = result.get(OUTPUT_KEYS.get(qt, "findings"), [])
+    per_doc = result.get("per_doc_findings", [])
+
+    doc.add_heading(result.get("question", "Rapport"), level=1)
+
+    meta = doc.add_paragraph()
+    meta.add_run(f"Query type: {qt}").bold = True
+    if idx:
+        doc.add_paragraph(f"Index: {idx}")
+    doc.add_paragraph(f"Generert: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    doc.add_paragraph(
+        f"{result.get('documents_visited', 0)} dokumenter besøkt · "
+        f"{result.get('documents_with_findings', 0)} med funn · "
+        f"{len(items)} resultater"
+    )
+
+    if items:
+        doc.add_heading("Aggregerte funn", level=2)
+        for item in items:
+            doc.add_heading(item.get("label", ""), level=3)
+            if item.get("description"):
+                doc.add_paragraph(item["description"])
+            for challenge in item.get("challenges") or []:
+                doc.add_paragraph(challenge, style="List Bullet")
+            if item.get("needs"):
+                doc.add_paragraph("Behov:").runs[0].bold = True
+                for need in item["needs"]:
+                    doc.add_paragraph(need, style="List Bullet")
+            if item.get("sources"):
+                p = doc.add_paragraph("Kilder: ")
+                p.add_run("; ".join(item["sources"])).italic = True
+
+    if per_doc:
+        doc.add_heading("Funn per dokument", level=2)
+        for entry in per_doc:
+            doc.add_heading(entry.get("tittel") or entry.get("filename", ""), level=3)
+            for finding in entry.get("findings", []):
+                doc.add_paragraph(finding, style="List Bullet")
+            chunks = entry.get("chunks") or []
+            if chunks:
+                doc.add_paragraph("Kildehenvisninger:", style="Intense Quote")
+                for chunk in chunks:
+                    page = chunk.get("page")
+                    excerpt = (chunk.get("excerpt") or "").strip()
+                    label = f"[Side {page}]  " if page is not None else ""
+                    p = doc.add_paragraph(style="List Bullet 2")
+                    if label:
+                        p.add_run(label).bold = True
+                    p.add_run(excerpt)
+
+    buf = BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+@app.get("/aggregate/report/<job_id>")
+async def aggregate_report(job_id):
+    job = _jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found — may have already been downloaded"}), 404
+    if job["status"] != "done":
+        return jsonify({"error": "Job not finished yet"}), 400
+
+    result = job.get("result") or {}
+    loop = asyncio.get_event_loop()
+    try:
+        docx_bytes = await loop.run_in_executor(None, _generate_report_docx, result)
+    except Exception as e:
+        logging.error("Report generation failed: %s", e, exc_info=True)
+        return jsonify({"error": "Report generation failed", "detail": str(e)}), 500
+
+    _jobs.pop(job_id, None)
+
+    from quart import Response
+    question_slug = "".join(c if c.isalnum() else "_" for c in result.get("question", "rapport")[:40])
+    filename = f"{question_slug}.docx"
+    return Response(
+        docx_bytes,
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
 
 
 if __name__ == "__main__":
