@@ -13,6 +13,7 @@
 *.eps
 *.jpg
 *.zip
+*.pptx
 
 garbage
 utils/crawl_ung_qa/ung_oss*.*

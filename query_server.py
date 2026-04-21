@@ -112,9 +112,19 @@ Settings.llm = AzureOpenAI(
 
 Settings.text_splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=128)
 
-# LangChain LLM for LangGraph workflows (aggregate_workflow uses this)
-_langchain_llm = AzureChatOpenAI(
-    azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
+# Strong model for per-document extraction (set AZURE_OPENAI_EXTRACT_DEPLOYMENT to override)
+_extract_llm = AzureChatOpenAI(
+    azure_deployment=os.getenv("AZURE_OPENAI_EXTRACT_DEPLOYMENT"),
+    api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+    temperature=0.0,
+    timeout=120,
+)
+
+# Fast/cheap model for final aggregation (falls back to extract model if not set)
+_aggregate_llm = AzureChatOpenAI(
+    azure_deployment=os.getenv("AZURE_OPENAI_AGGREGATE_DEPLOYMENT"),
     api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
     api_key=os.getenv("AZURE_OPENAI_API_KEY"),
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
@@ -512,7 +522,8 @@ async def aggregate_stream():
             state = {**params,
                 "document_store_path": entry["doc_store_path"],
                 "index_name": index_name,
-                "index": entry["index"], "llm": _langchain_llm,
+                "index": entry["index"], "llm": _extract_llm,
+                "extract_llm": _extract_llm, "aggregate_llm": _aggregate_llm,
                 "documents": [], "per_doc_findings": [], "result": None,
                 "event_queue": QueueProxy(),
             }

@@ -179,7 +179,9 @@ class AggregateState(TypedDict):
     document_store_path: str
     index_name: str                     # key into document_store.json when format is a dict
     index: Any
-    llm: Any
+    llm: Any           # kept for backward compat — used as fallback
+    extract_llm: Any   # stronger model for per-document extraction
+    aggregate_llm: Any # faster/cheaper model for final aggregation
     chunks_per_doc: int
     filters: dict
     documents: list[dict]
@@ -256,7 +258,8 @@ def load_documents(state: AggregateState) -> dict:
 
 def extract_per_document(state: AggregateState) -> dict:
     index: VectorStoreIndex = state["index"]
-    llm = state["llm"]
+    llm = state.get("extract_llm") or state["llm"]
+    print(f"[extract] Using LLM: {type(llm).__name__}", flush=True)
     question = state["question"]
     chunks_per_doc = state.get("chunks_per_doc", 4)
     query_type = state.get("query_type", "problems")
@@ -383,7 +386,7 @@ def extract_per_document(state: AggregateState) -> dict:
 # ── Node: aggregate_findings ──────────────────────────────────────────────────
 
 def aggregate_findings(state: AggregateState) -> dict:
-    llm = state["llm"]
+    llm = state.get("aggregate_llm") or state["llm"]
     per_doc = state["per_doc_findings"]
     question = state["question"]
     query_type = state.get("query_type", "problems")
@@ -441,6 +444,27 @@ def aggregate_findings(state: AggregateState) -> dict:
             {"label": f[:80], "description": f, "sources": [doc.tittel]}
             for doc in per_doc for f in doc.findings
         ]
+
+    # Build title → sorted unique page numbers from retrieved chunks
+    pages_by_title: dict[str, list[int]] = {}
+    for doc in per_doc:
+        pages = sorted({c.page for c in doc.chunks if c.page is not None})
+        if pages:
+            pages_by_title[doc.tittel] = pages
+
+    def _enrich_sources(sources: list) -> list:
+        enriched = []
+        for src in sources:
+            pages = pages_by_title.get(src)
+            if pages:
+                enriched.append(f"{src} (s. {', '.join(str(p) for p in pages)})")
+            else:
+                enriched.append(src)
+        return enriched
+
+    for item in items:
+        if "sources" in item:
+            item["sources"] = _enrich_sources(item["sources"])
 
     return {"result": {
         "question": question,
