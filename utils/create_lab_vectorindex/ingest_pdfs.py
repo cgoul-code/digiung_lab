@@ -30,6 +30,13 @@ from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
 from llama_index.readers.file import PDFReader, PptxReader
 
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urlsplit, urlunsplit
+
+# Cache for parent SPA pages keyed by URL without fragment
+_SPA_PAGE_CACHE: dict[str, str] = {}
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -95,6 +102,8 @@ def _load_and_validate_document_store(json_path: str, index_name: str) -> list[d
 
     missing = []
     for entry in entries:
+        if entry.get("url"):
+            continue
         filnavn = entry.get("filnavn", "")
         # Normalise Windows backslashes to the OS separator
         pdf_path = Path(filnavn.replace("\\", os.sep))
@@ -108,8 +117,15 @@ def _load_and_validate_document_store(json_path: str, index_name: str) -> list[d
         logging.error("Fix the missing files and rerun. Aborting.")
         sys.exit(1)
 
-    logging.info("All %d files verified on disk.", len(entries))
+    logging.info("All %d entries verified.", len(entries))
     return entries
+
+
+def _entry_key(entry: dict) -> str:
+    """Stable identifier used for manifest tracking."""
+    if entry.get("url"):
+        return entry["url"]
+    return str(Path(entry.get("filnavn", "").replace("\\", os.sep)))
 
 # ── Index helpers ─────────────────────────────────────────────────────────────
 
@@ -136,11 +152,146 @@ def _upsert_docs_into_index(
 
 # ── PDF loading ───────────────────────────────────────────────────────────────
 
+def _apply_entry_metadata(doc: Document, entry: dict, source: str, filename: str) -> None:
+    doc.metadata["source_file"]       = source
+    doc.metadata["filename"]          = filename
+    doc.metadata["tittel"]            = entry.get("tittel") or ""
+    doc.metadata["publisert_arstall"] = entry.get("publisert_arstall")
+    doc.metadata["publisert_av"]      = (entry.get("publisert_av") or "").strip()
+    doc.metadata["type_kilde"]        = entry.get("type_kilde") or ""
+    doc.metadata["malgruppe"]         = entry.get("malgruppe") or ""
+    doc.metadata["antall_deltakere"]  = entry.get("antall_deltakere") or ""
+    doc.metadata["segment"]           = entry.get("segment") or ""
+    doc.metadata["oppsummering"]      = entry.get("oppsummering") or ""
+
+
+def _http_get(url: str) -> str:
+    resp = requests.get(
+        url,
+        timeout=30,
+        headers={"User-Agent": "Mozilla/5.0 (digiung-lab-ingest)"},
+    )
+    resp.raise_for_status()
+    if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
+        resp.encoding = resp.apparent_encoding or "utf-8"
+    return resp.text
+
+
+def _spa_topic_text(url: str) -> tuple[str, str]:
+    """
+    For helsenorge.no/.../hvaerinnafor/#/temabeskrivelse/<slug> URLs the topic
+    body is embedded as JSON inside the parent page. Fetch the parent (cached)
+    and extract the matching topic object's title + ingress1 + ingress2.
+    Returns (title, body_text).
+    """
+    parts = urlsplit(url)
+    fragment = parts.fragment  # e.g. "/temabeskrivelse/<slug>"
+    if not fragment.startswith("/"):
+        fragment = "/" + fragment
+    parent_url = urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ""))
+
+    html = _SPA_PAGE_CACHE.get(parent_url)
+    if html is None:
+        html = _http_get(parent_url)
+        _SPA_PAGE_CACHE[parent_url] = html
+
+    needle = f'"urlPath":"{fragment}"'
+    idx = html.find(needle)
+    if idx < 0:
+        raise ValueError(f"Topic {fragment} not found in parent page {parent_url}")
+
+    # Walk backwards to the opening '{' of this object, then bracket-balance forward.
+    start = html.rfind("{", 0, idx)
+    if start < 0:
+        raise ValueError(f"Could not locate topic object start for {fragment}")
+
+    depth = 0
+    in_str = False
+    escape = False
+    end = -1
+    for i in range(start, len(html)):
+        ch = html[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+    if end < 0:
+        raise ValueError(f"Could not locate topic object end for {fragment}")
+
+    obj = json.loads(html[start:end])
+    title = (obj.get("title") or "").strip()
+    ingress1 = (obj.get("ingress1") or "").strip()
+    ingress2 = (obj.get("ingress2") or "").strip()
+    body = "\n\n".join(p for p in (title, ingress1, ingress2) if p)
+    if not body:
+        raise ValueError(f"Topic {fragment} has no extractable text")
+    return title, body
+
+
+def _fetch_url_as_document(entry: dict) -> list[Document]:
+    """Fetch an HTML page and return a single cleaned-text Document."""
+    url = entry["url"]
+
+    # SPA hash-fragment URLs (helsenorge "hvaerinnafor") need special handling
+    fragment = urlsplit(url).fragment
+    if fragment and "/temabeskrivelse/" in fragment:
+        page_title, text = _spa_topic_text(url)
+        enriched = dict(entry)
+        if not enriched.get("tittel"):
+            enriched["tittel"] = page_title
+        doc = Document(text=text, doc_id=url)
+        _apply_entry_metadata(doc, enriched, source=url, filename=url)
+        doc.metadata["url"] = url
+        return [doc]
+
+    html = _http_get(url)
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript", "nav", "footer", "header", "form", "aside"]):
+        tag.decompose()
+
+    main = soup.find("main") or soup.find("article") or soup.body or soup
+    text = main.get_text(separator="\n", strip=True)
+    if not text.strip():
+        raise ValueError(f"No textual content extracted from {url}")
+
+    page_title = ""
+    if soup.title and soup.title.string:
+        page_title = soup.title.string.strip()
+    elif soup.find("h1"):
+        page_title = soup.find("h1").get_text(strip=True)
+
+    enriched = dict(entry)
+    if not enriched.get("tittel"):
+        enriched["tittel"] = page_title
+
+    doc = Document(text=text, doc_id=url)
+    _apply_entry_metadata(doc, enriched, source=url, filename=url)
+    doc.metadata["url"] = url
+    return [doc]
+
+
 def load_entry_as_documents(entry: dict) -> list[Document]:
     """
-    Read all pages from the PDF described by a single document_store entry
-    and attach all metadata fields to every page document.
+    Build Document(s) for a single document_store entry. Supports two formats:
+      - File entry: {"filnavn": "...pdf", ...} → one Document per page
+      - URL entry:  {"url": "https://...", "method": "GET"} → one Document per URL
     """
+    if entry.get("url"):
+        return _fetch_url_as_document(entry)
+
     filnavn = entry.get("filnavn", "")
     pdf_path = Path(filnavn.replace("\\", os.sep))
 
@@ -153,20 +304,7 @@ def load_entry_as_documents(entry: dict) -> list[Document]:
 
     for page_doc in pages:
         page_doc.doc_id = str(pdf_path)
-
-        # Base file metadata
-        page_doc.metadata["source_file"] = str(pdf_path)
-        page_doc.metadata["filename"]    = pdf_path.name
-
-        # All fields from document_store.json
-        page_doc.metadata["tittel"]            = entry.get("tittel") or ""
-        page_doc.metadata["publisert_arstall"] = entry.get("publisert_arstall")
-        page_doc.metadata["publisert_av"]      = (entry.get("publisert_av") or "").strip()
-        page_doc.metadata["type_kilde"]        = entry.get("type_kilde") or ""
-        page_doc.metadata["malgruppe"]         = entry.get("malgruppe") or ""
-        page_doc.metadata["antall_deltakere"]  = entry.get("antall_deltakere") or ""
-        page_doc.metadata["segment"]           = entry.get("segment") or ""
-        page_doc.metadata["oppsummering"]      = entry.get("oppsummering") or ""
+        _apply_entry_metadata(page_doc, entry, source=str(pdf_path), filename=pdf_path.name)
 
     return pages
 
@@ -184,22 +322,24 @@ def run_incremental_ingest(
     logging.info("Found %d entries in document store, %d already ingested", len(entries), len(processed))
 
     for entry in entries:
-        pdf_path = str(Path(entry["filnavn"].replace("\\", os.sep)))
+        key = _entry_key(entry)
 
-        if pdf_path in processed:
-            logging.info("Skip (already ingested): %s", pdf_path)
+        if key in processed:
+            logging.info("Skip (already ingested): %s", key)
             continue
 
-        logging.info("Ingesting: %s", entry.get("tittel", pdf_path))
+        logging.info("Ingesting: %s", entry.get("tittel") or key)
         try:
             pages = load_entry_as_documents(entry)
-            logging.info("  → %d pages loaded", len(pages))
+            logging.info("  → %d document(s) loaded", len(pages))
             _upsert_docs_into_index(name=name, storage=storage, documents=pages)
-            processed.add(pdf_path)
+            processed.add(key)
             _save_processed_doc_ids(storage, name, processed)
             logging.info("  ✓ Done")
+        except requests.HTTPError as e:
+            logging.warning("  ✗ Skipping %s: %s", key, e)
         except Exception:
-            logging.error("  ✗ Failed for %s; will retry on next run", pdf_path, exc_info=True)
+            logging.error("  ✗ Failed for %s; will retry on next run", key, exc_info=True)
 
     logging.info("Ingestion complete. Total ingested: %d / %d", len(processed), len(entries))
 

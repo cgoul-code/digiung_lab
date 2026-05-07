@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from openpyxl import load_workbook
 
-XLSX_PATH    = Path(r"C:\Users\ChristianGoulignac\Downloads\kilder.xlsx")
+XLSX_PATH    = Path(r"C:\Users\ChristianGoulignac\vscode\llama\digiung_lab\utils\create_lab_vectorindex\kilder.xlsx")
 OUT_PATH     = Path("./utils/create_lab_vectorindex/document_store_kilder.json")
 INDEX_NAME   = "kilder"
 FILNAVN_PREFIX = "data\\digiung_lab\\"  # prepended to every filnavn read from the spreadsheet

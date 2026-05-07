@@ -276,8 +276,12 @@ def extract_per_document(state: AggregateState) -> dict:
     })
 
     for doc_idx, entry in enumerate(state["documents"]):
-        filename = os.path.basename(entry.get("filnavn", "").replace("\\", os.sep))
-        tittel = entry.get("tittel", filename)
+        if entry.get("url"):
+            # URL-ingested entries store the URL as `filename` in chunk metadata
+            filename = entry["url"]
+        else:
+            filename = os.path.basename(entry.get("filnavn", "").replace("\\", os.sep))
+        tittel = entry.get("tittel") or filename
 
         _emit(state, {
             "event":    "doc_start",
