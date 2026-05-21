@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(.venv/Scripts/python.exe -c ' *)"
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(/c/Users/ChristianGoulignac/vscode/llama/digiung_lab/.venv/Scripts/python.exe _make_presentation.py)",
+      "Read(//c/Users/ChristianGoulignac/vscode/llama/digiung_lab-query-client/**)",
+      "Bash(./node_modules/.bin/vite build *)",
+      "Bash(/c/Users/ChristianGoulignac/vscode/llama/digiung_lab/.venv/Scripts/python.exe -m pip install --quiet azure-storage-blob)",
+      "Bash(/c/Users/ChristianGoulignac/vscode/llama/digiung_lab/.venv/Scripts/python.exe -c \"from azure.storage.blob import BlobServiceClient; import azure.storage.blob as ab; print\\(ab.__version__\\)\")"
     ]
   }
 }

@@ -22,6 +22,8 @@ import datetime
 import json
 import logging
 import os
+import re
+import threading
 import uuid
 from io import BytesIO
 from typing import Optional
@@ -50,6 +52,7 @@ from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
 from llama_index.llms.azure_openai import AzureOpenAI
 from langchain_openai import AzureChatOpenAI
 from aggregate_workflow import aggregate_graph, QUERY_TYPES
+import azure_blob
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,6 +73,7 @@ _PREFIX = "." if _LOCAL else ""
 # ── Config ────────────────────────────────────────────────────────────────────
 
 INDEX_STORAGE     = _PREFIX + os.getenv("INDEX_STORAGE", "/blobstorage/chatbot")
+DATA_DIR          = _PREFIX + os.getenv("DATA_DIR",      "/data")
 SIMILARITY_TOP_K  = int(os.getenv("SIMILARITY_TOP_K",   "5"))
 SIMILARITY_CUTOFF = float(os.getenv("SIMILARITY_CUTOFF", "0.3"))
 
@@ -79,7 +83,9 @@ DOCUMENT_STORE_PATH = _doc_store_env or "./utils/create_lab_vectorindex/document
 
 print(f"[config] LOCAL={_LOCAL}", flush=True)
 print(f"[config] INDEX_STORAGE={INDEX_STORAGE}", flush=True)
+print(f"[config] DATA_DIR={DATA_DIR}", flush=True)
 print(f"[config] DOCUMENT_STORE_PATH (fallback)={DOCUMENT_STORE_PATH}", flush=True)
+print(f"[config] BLOB_SYNC: enabled={azure_blob.ENABLED}  in_azure={azure_blob.IN_AZURE}  container={azure_blob.CONTAINER_NAME!r}", flush=True)
 
 # All metadata fields that can be filtered on
 FILTERABLE_FIELDS = {
@@ -176,6 +182,17 @@ def _resolve_index(name: Optional[str]):
 
 async def _load_all_indexes_async():
     global _indexes
+
+    # Pull canonical copy from Azure Blob container before loading from disk
+    # (no-op when not in Azure or when CONNECTION_STRING isn't configured).
+    if azure_blob.ENABLED:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            azure_blob.bootstrap_download,
+            INDEX_STORAGE, DATA_DIR, DOCUMENT_STORE_PATH,
+        )
+
     if not os.path.isdir(INDEX_STORAGE):
         print(f"[index] INDEX_STORAGE not found: {INDEX_STORAGE}", flush=True)
         return
@@ -188,14 +205,14 @@ async def _load_all_indexes_async():
         names = sorted(_ds.keys()) if isinstance(_ds, dict) else []
     else:
         names = []
-    
+
     print(f"[index] Found index names in document_store.json: {names}", flush=True)
 
     # Filter to those that actually have a built index on disk
     names = [n for n in names if os.path.isfile(os.path.join(INDEX_STORAGE, n, "docstore.json"))]
 
     print(f"[index] Indexes with on-disk data: {names}", flush=True)
-    
+
     if not names:
         print(f"[index] No matching indexes found in {DOCUMENT_STORE_PATH} / {INDEX_STORAGE}", flush=True)
         return
@@ -271,6 +288,38 @@ def _build_filters(filter_dict: dict) -> Optional[MetadataFilters]:
         return c if isinstance(c, MetadataFilters) else MetadataFilters(filters=[c], condition=FilterCondition.AND)
 
     return MetadataFilters(filters=and_conditions, condition=FilterCondition.AND)
+
+
+def _active_filenames(index_name: str) -> Optional[list[str]]:
+    """Return the list of filenames currently in document_store.json for an index.
+    Returns None if the index isn't tracked in JSON at all (no restriction applied);
+    returns [] if the index is tracked but has no entries (block all chunks)."""
+    try:
+        with open(DOCUMENT_STORE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or index_name not in data:
+        return None
+    entries = data.get(index_name, [])
+    valid = []
+    for e in entries:
+        if e.get("url"):
+            valid.append(e["url"])
+        elif e.get("filnavn"):
+            valid.append(os.path.basename(e["filnavn"].replace("\\", os.sep)))
+    return valid
+
+
+def _combine_and(*items) -> Optional[MetadataFilters]:
+    """AND-combine MetadataFilter / MetadataFilters / None items."""
+    non_null = [x for x in items if x is not None]
+    if not non_null:
+        return None
+    if len(non_null) == 1:
+        f = non_null[0]
+        return f if isinstance(f, MetadataFilters) else MetadataFilters(filters=[f], condition=FilterCondition.AND)
+    return MetadataFilters(filters=non_null, condition=FilterCondition.AND)
 
 
 # ── Document store endpoint ──────────────────────────────────────────────────
@@ -399,8 +448,24 @@ async def query():
 
     top_k   = int(body.get("top_k",  SIMILARITY_TOP_K))
     cutoff  = float(body.get("cutoff", SIMILARITY_CUTOFF))
-    filters = _build_filters(body.get("filters") or {})
-    print(f"[/query] index={index_name} filters={filters}", flush=True)
+    user_filters = _build_filters(body.get("filters") or {})
+
+    # Restrict to filenames currently in document_store.json — keeps /query
+    # consistent with /aggregate (which already iterates JSON entries).
+    active = _active_filenames(index_name)
+    active_filter = None
+    if active is not None:
+        if not active:
+            return jsonify({
+                "question": question,
+                "filters":  body.get("filters") or {},
+                "answer":   "Ingen aktive dokumenter i indeksen.",
+                "sources":  [],
+            })
+        active_filter = MetadataFilter(key="filename", value=active, operator=FilterOperator.IN)
+
+    filters = _combine_and(user_filters, active_filter)
+    print(f"[/query] index={index_name} active_count={len(active) if active is not None else 'unfiltered'} filters={filters}", flush=True)
 
     # ── Retrieve + synthesize in executor (LlamaIndex is sync) ───────────────
     def _run_query():
@@ -449,6 +514,7 @@ async def query():
             "type_kilde":       meta.get("type_kilde", ""),
             "malgruppe":        meta.get("malgruppe", ""),
             "segment":          meta.get("segment", ""),
+            "kilde_url":        meta.get("kilde_url", ""),
             "page_number":      meta.get("page_label") or meta.get("page"),
             "score":            round(float(getattr(nws, "score", 0.0)), 4),
             "excerpt":          text[:300],
@@ -499,7 +565,8 @@ async def aggregate_stream():
         return jsonify({"error": "Missing 'question'"}), 400
 
     job_id = str(uuid.uuid4())
-    _jobs[job_id] = {"status": "running", "events": [], "result": None}
+    cancel_event = threading.Event()
+    _jobs[job_id] = {"status": "running", "events": [], "result": None, "cancel_event": cancel_event}
 
     loop = asyncio.get_event_loop()
 
@@ -512,6 +579,8 @@ async def aggregate_stream():
             _jobs[job_id]["result"] = item
         elif item.get("event") == "error":
             _jobs[job_id]["status"] = "error"
+        elif item.get("event") == "cancelled":
+            _jobs[job_id]["status"] = "cancelled"
 
     class QueueProxy:
         def put_nowait(self, item): loop.call_soon_threadsafe(_emit_job, item)
@@ -526,14 +595,21 @@ async def aggregate_stream():
                 "extract_llm": _extract_llm, "aggregate_llm": _aggregate_llm,
                 "documents": [], "per_doc_findings": [], "result": None,
                 "event_queue": QueueProxy(),
+                "cancel_event": cancel_event,
             }
             final = aggregate_graph.invoke(state)
+            if cancel_event.is_set():
+                loop.call_soon_threadsafe(_emit_job, {"event": "cancelled", "message": "Avbrutt av bruker"})
+                return
             per_doc = [
                 {
-                    "tittel":    f.tittel,
-                    "filename":  f.filename,
-                    "findings":  f.findings,
-                    "chunks":    [{"page": c.page, "excerpt": c.excerpt} for c in f.chunks],
+                    "tittel":            f.tittel,
+                    "filename":          f.filename,
+                    "kilde_url":         f.kilde_url,
+                    "publisert_av":      f.publisert_av,
+                    "publisert_arstall": f.publisert_arstall,
+                    "findings":          f.findings,
+                    "chunks":            [{"page": c.page, "excerpt": c.excerpt} for c in f.chunks],
                 }
                 for f in (final.get("per_doc_findings") or [])
                 if f.findings
@@ -555,6 +631,20 @@ async def aggregate_stream():
     return jsonify({"job_id": job_id})
 
 
+@app.post("/aggregate/cancel/<job_id>")
+async def aggregate_cancel(job_id):
+    """Request cancellation of a running aggregate job."""
+    job = _jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    if job["status"] != "running":
+        return jsonify({"ok": True, "status": job["status"], "message": "Already finished"})
+    cancel_event = job.get("cancel_event")
+    if cancel_event is not None:
+        cancel_event.set()
+    return jsonify({"ok": True, "status": "cancelling"})
+
+
 @app.get("/aggregate/stream/<job_id>")
 async def aggregate_stream_poll(job_id):
     """
@@ -570,8 +660,8 @@ async def aggregate_stream_poll(job_id):
     status = job["status"]
     total  = len(job["events"])
 
-    # Clean up error jobs immediately; done jobs are kept until report is downloaded
-    if status == "error" and last >= total:
+    # Clean up error/cancelled jobs immediately; done jobs are kept until report is downloaded
+    if status in ("error", "cancelled") and last >= total:
         _jobs.pop(job_id, None)
 
     return jsonify({
@@ -585,6 +675,34 @@ def _xml_safe(text) -> str:
     """Remove characters invalid in XML 1.0 (NULL bytes and control chars)."""
     import re
     return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', str(text or ''))
+
+
+def _add_hyperlink(paragraph, url: str, text: str):
+    """Append a clickable hyperlink run to a python-docx paragraph."""
+    from docx.oxml.shared import OxmlElement, qn
+    part = paragraph.part
+    r_id = part.relate_to(
+        url,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True,
+    )
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+    new_run = OxmlElement("w:r")
+    r_pr = OxmlElement("w:rPr")
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "0563C1")
+    r_pr.append(color)
+    u = OxmlElement("w:u")
+    u.set(qn("w:val"), "single")
+    r_pr.append(u)
+    new_run.append(r_pr)
+    t = OxmlElement("w:t")
+    t.text = text
+    new_run.append(t)
+    hyperlink.append(new_run)
+    paragraph._p.append(hyperlink)
+    return hyperlink
 
 
 def _generate_report_docx(result: dict) -> bytes:
@@ -625,12 +743,35 @@ def _generate_report_docx(result: dict) -> bytes:
                     doc.add_paragraph(_xml_safe(need), style="List Bullet")
             if item.get("sources"):
                 p = doc.add_paragraph("Kilder: ")
-                p.add_run("; ".join(_xml_safe(s) for s in item["sources"])).italic = True
+                labels = []
+                for s in item["sources"]:
+                    if isinstance(s, dict):
+                        tittel = s.get("tittel") or ""
+                        pages = s.get("pages") or []
+                        labels.append(tittel + (f" (s. {', '.join(str(pg) for pg in pages)})" if pages else ""))
+                    else:
+                        labels.append(str(s))
+                p.add_run("; ".join(_xml_safe(l) for l in labels)).italic = True
 
     if per_doc:
         doc.add_heading("Funn per dokument", level=2)
         for entry in per_doc:
-            doc.add_heading(_xml_safe(entry.get("tittel") or entry.get("filename", "")), level=3)
+            tittel_text = _xml_safe(entry.get("tittel") or entry.get("filename", ""))
+            publisert_av = _xml_safe((entry.get("publisert_av") or "").strip())
+            publisert_arstall = entry.get("publisert_arstall")
+            arstall_text = _xml_safe(str(publisert_arstall)) if publisert_arstall not in (None, "") else ""
+            heading_parts = [tittel_text]
+            if publisert_av:
+                heading_parts.append(publisert_av)
+            if arstall_text:
+                heading_parts.append(arstall_text)
+            heading_label = " - ".join(heading_parts)
+            kilde_url = (entry.get("kilde_url") or "").strip()
+            heading_p = doc.add_heading("", level=3)
+            if kilde_url:
+                _add_hyperlink(heading_p, kilde_url, heading_label)
+            else:
+                heading_p.add_run(heading_label)
             for finding in entry.get("findings", []):
                 doc.add_paragraph(_xml_safe(finding), style="List Bullet")
             chunks = entry.get("chunks") or []
@@ -676,6 +817,307 @@ async def aggregate_report(job_id):
         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
     )
+
+
+# ── Admin API ────────────────────────────────────────────────────────────────
+# Manage document_store.json + uploaded files + trigger reindex jobs from the UI
+
+_doc_store_lock = threading.Lock()
+_reindex_jobs: dict = {}
+
+
+def _safe_index_name(name: str) -> str:
+    if not name or not re.fullmatch(r"[A-Za-z0-9_\-]+", name):
+        raise ValueError(f"Invalid index_name: {name!r}")
+    return name
+
+
+def _safe_filename(name: str) -> str:
+    base = os.path.basename(name.replace("\\", "/"))
+    if not base or base in (".", "..") or "/" in base or "\\" in base:
+        raise ValueError(f"Invalid filename: {name!r}")
+    return base
+
+
+def _files_dir_for(index_name: str) -> str:
+    return os.path.join(DATA_DIR, _safe_index_name(index_name))
+
+
+def _load_full_doc_store() -> dict:
+    if not os.path.isfile(DOCUMENT_STORE_PATH):
+        return {}
+    with open(DOCUMENT_STORE_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data if isinstance(data, dict) else {}
+
+
+def _save_full_doc_store(data: dict) -> None:
+    os.makedirs(os.path.dirname(DOCUMENT_STORE_PATH), exist_ok=True)
+    tmp = DOCUMENT_STORE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, DOCUMENT_STORE_PATH)
+    # Mirror to blob (no-op outside Azure)
+    azure_blob.upload_document_store(DOCUMENT_STORE_PATH)
+
+
+def _entry_admin_key(entry: dict) -> str:
+    return entry.get("url") or entry.get("filnavn") or ""
+
+
+@app.post("/admin/indexes")
+async def admin_create_index():
+    """Create a new (empty) index entry in document_store.json.
+    Body or query param `name` is required and must match _safe_index_name."""
+    name = request.args.get("name", "") or ""
+    if not name:
+        try:
+            body = await request.get_json(silent=True) or {}
+            name = body.get("name", "")
+        except Exception:
+            name = ""
+    try:
+        _safe_index_name(name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    with _doc_store_lock:
+        data = _load_full_doc_store()
+        if name in data:
+            return jsonify({"error": f"Index '{name}' already exists"}), 409
+        data[name] = []
+        _save_full_doc_store(data)
+
+    return jsonify({"ok": True, "name": name})
+
+
+@app.get("/admin/entries")
+async def admin_list_entries():
+    name = request.args.get("index_name", "")
+    try:
+        _safe_index_name(name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    with _doc_store_lock:
+        data = _load_full_doc_store()
+        entries = list(data.get(name, []))
+    return jsonify({"index_name": name, "entries": entries})
+
+
+@app.post("/admin/entries")
+async def admin_add_entry():
+    name = request.args.get("index_name", "")
+    try:
+        _safe_index_name(name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    content_type = (request.content_type or "").lower()
+
+    if content_type.startswith("multipart/"):
+        files = await request.files
+        form = await request.form
+        uploaded = files.get("file")
+        if not uploaded:
+            return jsonify({"error": "Missing 'file' in multipart body"}), 400
+        try:
+            fname = _safe_filename(uploaded.filename or "")
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
+        dest_dir = _files_dir_for(name)
+        os.makedirs(dest_dir, exist_ok=True)
+        dest_path = os.path.join(dest_dir, fname)
+        await uploaded.save(dest_path)
+        if not os.path.isfile(dest_path) or os.path.getsize(dest_path) == 0:
+            return jsonify({"error": f"File was not written or is empty: {dest_path}"}), 500
+        # Mirror to blob (no-op outside Azure)
+        azure_blob.upload_data_file(dest_path, name, fname)
+
+        entry = {
+            "tittel":           form.get("tittel") or "",
+            "filnavn":          dest_path,
+            "publisert_arstall":(int(form.get("publisert_arstall")) if (form.get("publisert_arstall") or "").strip().isdigit() else None),
+            "publisert_av":     form.get("publisert_av") or "",
+            "type_kilde":       form.get("type_kilde") or "",
+            "malgruppe":        form.get("malgruppe") or "",
+            "antall_deltakere": form.get("antall_deltakere") or None,
+            "segment":          form.get("segment") or "",
+            "oppsummering":     form.get("oppsummering") or "",
+        }
+    else:
+        body = await request.get_json(force=True) or {}
+        if not body.get("url") and not body.get("filnavn"):
+            return jsonify({"error": "Entry must include 'url' or 'filnavn'"}), 400
+        entry = body
+
+    with _doc_store_lock:
+        data = _load_full_doc_store()
+        entries = list(data.get(name, []))
+        new_key = _entry_admin_key(entry)
+        if new_key and any(_entry_admin_key(e) == new_key for e in entries):
+            return jsonify({"error": f"Entry with key '{new_key}' already exists"}), 409
+        entries.append(entry)
+        data[name] = entries
+        _save_full_doc_store(data)
+
+    return jsonify({"ok": True, "entry": entry})
+
+
+@app.put("/admin/entries")
+async def admin_update_entry():
+    name = request.args.get("index_name", "")
+    key  = request.args.get("key", "")
+    try:
+        _safe_index_name(name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not key:
+        return jsonify({"error": "Missing 'key' query param"}), 400
+
+    body = await request.get_json(force=True) or {}
+
+    with _doc_store_lock:
+        data = _load_full_doc_store()
+        entries = list(data.get(name, []))
+        for i, e in enumerate(entries):
+            if _entry_admin_key(e) == key:
+                merged = {**e, **body}
+                # Don't allow changing the key fields via PUT — use delete + add for that
+                merged["url"] = e.get("url")
+                merged["filnavn"] = e.get("filnavn")
+                entries[i] = merged
+                data[name] = entries
+                _save_full_doc_store(data)
+                return jsonify({"ok": True, "entry": merged})
+    return jsonify({"error": "Entry not found"}), 404
+
+
+@app.delete("/admin/entries")
+async def admin_delete_entry():
+    name = request.args.get("index_name", "")
+    key  = request.args.get("key", "")
+    try:
+        _safe_index_name(name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not key:
+        return jsonify({"error": "Missing 'key' query param"}), 400
+
+    with _doc_store_lock:
+        data = _load_full_doc_store()
+        entries = list(data.get(name, []))
+        remaining = [e for e in entries if _entry_admin_key(e) != key]
+        if len(remaining) == len(entries):
+            return jsonify({"error": "Entry not found"}), 404
+        data[name] = remaining
+        _save_full_doc_store(data)
+    return jsonify({"ok": True, "removed_key": key})
+
+
+def _run_reindex_job(job_id: str, name: str, loop: asyncio.AbstractEventLoop, mode: str = "incremental"):
+    """Run ingest_pdfs.run_incremental_ingest and stream events into _reindex_jobs[job_id].
+
+    mode:
+      "incremental" — only ingest new entries (default)
+      "full"        — delete existing index + manifest first, then ingest everything
+    """
+    job = _reindex_jobs[job_id]
+
+    def _emit(ev):
+        ev = dict(ev)
+        ev["ts"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        def _apply():
+            job["events"].append(ev)
+            if ev.get("event") == "done":
+                job["status"] = "done"
+            elif ev.get("event") == "error":
+                job["status"] = "error"
+        loop.call_soon_threadsafe(_apply)
+
+    try:
+        # Lazy import to avoid heavy startup cost
+        from utils.create_lab_vectorindex.ingest_pdfs import run_incremental_ingest
+
+        if mode == "full":
+            import shutil
+            persist_dir = os.path.join(INDEX_STORAGE, name)
+            if os.path.isdir(persist_dir):
+                shutil.rmtree(persist_dir)
+                _emit({"event": "cleared", "message": f"Deleted local index at {persist_dir}"})
+            # Also clear blob copy so old chunks don't linger (no-op outside Azure)
+            try:
+                removed = azure_blob.delete_prefix(f"{name}/")
+                if removed:
+                    _emit({"event": "cleared", "message": f"Deleted {removed} blobs under {name}/"})
+            except Exception as e:
+                logging.warning("Blob cleanup failed for %s: %s", name, e)
+                _emit({"event": "cleared_failed", "message": str(e)})
+
+        run_incremental_ingest(
+            storage=INDEX_STORAGE,
+            name=name,
+            document_store_path=DOCUMENT_STORE_PATH,
+            on_progress=_emit,
+        )
+        # Reload the in-memory index so /query sees new content immediately
+        try:
+            persist_dir = os.path.join(INDEX_STORAGE, name)
+            ctx = StorageContext.from_defaults(persist_dir=persist_dir)
+            idx = load_index_from_storage(ctx)
+            local_store = os.path.join(persist_dir, "document_store.json")
+            doc_store_path = local_store if os.path.isfile(local_store) else DOCUMENT_STORE_PATH
+            _indexes[name] = {"index": idx, "doc_store_path": doc_store_path}
+            _emit({"event": "reload", "message": f"In-memory index '{name}' reloaded"})
+        except Exception as e:
+            logging.error("Failed to reload index %s after reindex: %s", name, e, exc_info=True)
+            _emit({"event": "reload_failed", "message": str(e)})
+
+        # Mirror the updated index files back to blob (no-op outside Azure)
+        try:
+            uploaded = azure_blob.upload_index_dir(INDEX_STORAGE, name)
+            if uploaded:
+                _emit({"event": "blob_upload", "message": f"Uploaded {uploaded} index files to blob"})
+        except Exception as e:
+            logging.error("Blob upload failed for index %s: %s", name, e, exc_info=True)
+            _emit({"event": "blob_upload_failed", "message": str(e)})
+    except Exception as e:
+        logging.error("Reindex job %s failed: %s", job_id, e, exc_info=True)
+        _emit({"event": "error", "message": str(e)})
+
+
+@app.post("/admin/reindex")
+async def admin_reindex():
+    name = request.args.get("index_name", "")
+    mode = request.args.get("mode", "incremental")
+    try:
+        _safe_index_name(name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if mode not in ("incremental", "full"):
+        return jsonify({"error": f"Invalid mode: {mode!r} (expected 'incremental' or 'full')"}), 400
+
+    job_id = str(uuid.uuid4())
+    _reindex_jobs[job_id] = {"status": "running", "events": [], "index_name": name, "mode": mode}
+
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _run_reindex_job, job_id, name, loop, mode)
+    return jsonify({"job_id": job_id, "mode": mode})
+
+
+@app.get("/admin/reindex/<job_id>")
+async def admin_reindex_poll(job_id):
+    job = _reindex_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    last = int(request.args.get("last", 0))
+    new_events = job["events"][last:]
+    return jsonify({
+        "status": job["status"],
+        "index_name": job.get("index_name"),
+        "events": new_events,
+        "total": len(job["events"]),
+    })
 
 
 if __name__ == "__main__":

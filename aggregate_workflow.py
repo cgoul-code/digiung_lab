@@ -167,10 +167,13 @@ class ChunkRef(BaseModel):
     excerpt: str           = ""
 
 class DocFindings(BaseModel):
-    tittel:   str
-    filename: str
-    findings: list[str]      = Field(default_factory=list)
-    chunks:   list[ChunkRef] = Field(default_factory=list)
+    tittel:             str
+    filename:           str
+    kilde_url:          str            = ""
+    publisert_av:       str            = ""
+    publisert_arstall:  Optional[int]  = None
+    findings:           list[str]      = Field(default_factory=list)
+    chunks:             list[ChunkRef] = Field(default_factory=list)
 
 class AggregateState(TypedDict):
     question: str
@@ -188,6 +191,7 @@ class AggregateState(TypedDict):
     per_doc_findings: list[DocFindings]
     result: Optional[dict]
     event_queue: Optional[Any]          # queue.Queue for SSE progress events
+    cancel_event: Optional[Any]         # threading.Event set when user cancels
 
 
 # ── Node: load_documents ──────────────────────────────────────────────────────
@@ -275,7 +279,18 @@ def extract_per_document(state: AggregateState) -> dict:
         "total_docs": total_docs,
     })
 
+    cancel_event = state.get("cancel_event")
     for doc_idx, entry in enumerate(state["documents"]):
+        if cancel_event is not None and cancel_event.is_set():
+            logging.info("[aggregate] Cancellation requested — stopping after %d/%d docs",
+                         doc_idx, total_docs)
+            _emit(state, {
+                "event":   "cancelled",
+                "message": f"Avbrutt etter {doc_idx}/{total_docs} dokumenter",
+                "index":   doc_idx,
+                "total":   total_docs,
+            })
+            break
         if entry.get("url"):
             # URL-ingested entries store the URL as `filename` in chunk metadata
             filename = entry["url"]
@@ -373,9 +388,17 @@ def extract_per_document(state: AggregateState) -> dict:
         })
 
         if findings:
+            ar = entry.get("publisert_arstall")
+            try:
+                ar_int = int(ar) if ar not in (None, "") else None
+            except (TypeError, ValueError):
+                ar_int = None
             per_doc_findings.append(DocFindings(
                 tittel=tittel,
                 filename=filename,
+                kilde_url=(entry.get("kilde_url") or ""),
+                publisert_av=(entry.get("publisert_av") or ""),
+                publisert_arstall=ar_int,
                 findings=findings,
                 chunks=chunks,
             ))
@@ -396,6 +419,17 @@ def aggregate_findings(state: AggregateState) -> dict:
     query_type = state.get("query_type", "problems")
     n_personas = state.get("n_personas", 3)
     cfg = QUERY_TYPES.get(query_type, QUERY_TYPES["free"])
+
+    cancel_event = state.get("cancel_event")
+    if cancel_event is not None and cancel_event.is_set():
+        return {"result": {
+            "question": question,
+            "query_type": query_type,
+            "documents_visited": len(state["documents"]),
+            "documents_with_findings": len(per_doc),
+            "cancelled": True,
+            cfg["output_key"]: [],
+        }}
 
     _emit(state, {
         "event":   "node",
@@ -451,19 +485,23 @@ def aggregate_findings(state: AggregateState) -> dict:
 
     # Build title → sorted unique page numbers from retrieved chunks
     pages_by_title: dict[str, list[int]] = {}
+    url_by_title: dict[str, str] = {}
     for doc in per_doc:
         pages = sorted({c.page for c in doc.chunks if c.page is not None})
         if pages:
             pages_by_title[doc.tittel] = pages
+        if doc.kilde_url:
+            url_by_title[doc.tittel] = doc.kilde_url
 
     def _enrich_sources(sources: list) -> list:
         enriched = []
         for src in sources:
-            pages = pages_by_title.get(src)
-            if pages:
-                enriched.append(f"{src} (s. {', '.join(str(p) for p in pages)})")
-            else:
-                enriched.append(src)
+            tittel = src if isinstance(src, str) else (src.get("tittel") or "")
+            enriched.append({
+                "tittel":    tittel,
+                "pages":     pages_by_title.get(tittel, []),
+                "kilde_url": url_by_title.get(tittel, ""),
+            })
         return enriched
 
     for item in items:

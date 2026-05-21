@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tasklist /FI \"IMAGENAME eq python.exe\")",
+      "PowerShell(Get-Process python -ErrorAction SilentlyContinue)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\ChristianGoulignac\\vscode\\llama\\digiung_lab-query-client\\src"
+    ]
+  }
+}

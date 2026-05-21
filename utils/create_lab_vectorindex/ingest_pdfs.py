@@ -73,16 +73,19 @@ def _save_processed_doc_ids(storage: str, name: str, ids: set[str]) -> None:
 
 # ── Document store ────────────────────────────────────────────────────────────
 
+class DocumentStoreValidationError(Exception):
+    """Raised when document_store.json is missing, malformed, or references missing files."""
+
+
 def _load_and_validate_document_store(json_path: str, index_name: str) -> list[dict]:
     """
     Load document_store.json and verify every file listed actually exists.
     Supports both the legacy flat-list format and the new dict-of-lists format:
       {"IndexName": [...], "OtherIndex": [...]}
-    Aborts with a clear error message if any file is missing.
+    Raises DocumentStoreValidationError with a detailed message if anything is wrong.
     """
     if not os.path.isfile(json_path):
-        logging.error("document_store.json not found at: %s", json_path)
-        sys.exit(1)
+        raise DocumentStoreValidationError(f"document_store.json not found at: {json_path}")
 
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -92,11 +95,10 @@ def _load_and_validate_document_store(json_path: str, index_name: str) -> list[d
     elif index_name in data:
         entries = data[index_name]
     else:
-        logging.error(
-            "Index '%s' not found in %s. Available: %s",
-            index_name, json_path, list(data.keys())
+        raise DocumentStoreValidationError(
+            f"Index '{index_name}' not found in {json_path}. "
+            f"Available: {list(data.keys())}"
         )
-        sys.exit(1)
 
     logging.info("Loaded %d entries for index '%s' from %s", len(entries), index_name, json_path)
 
@@ -111,11 +113,16 @@ def _load_and_validate_document_store(json_path: str, index_name: str) -> list[d
             missing.append(str(pdf_path))
 
     if missing:
-        logging.error("The following files listed in document_store.json do not exist on disk:")
-        for m in missing:
-            logging.error("  ✗ %s", m)
-        logging.error("Fix the missing files and rerun. Aborting.")
-        sys.exit(1)
+        bullet_list = "\n".join(f"  ✗ {m}" for m in missing)
+        msg = (
+            f"{len(missing)} file(s) listed in document_store.json do not exist on disk:\n"
+            f"{bullet_list}\n"
+            f"Fix the missing files and rerun."
+        )
+        # Still log locally so the server log keeps the audit trail
+        for line in msg.splitlines():
+            logging.error(line)
+        raise DocumentStoreValidationError(msg)
 
     logging.info("All %d entries verified.", len(entries))
     return entries
@@ -163,6 +170,7 @@ def _apply_entry_metadata(doc: Document, entry: dict, source: str, filename: str
     doc.metadata["antall_deltakere"]  = entry.get("antall_deltakere") or ""
     doc.metadata["segment"]           = entry.get("segment") or ""
     doc.metadata["oppsummering"]      = entry.get("oppsummering") or ""
+    doc.metadata["kilde_url"]         = entry.get("kilde_url") or ""
 
 
 def _http_get(url: str) -> str:
@@ -314,34 +322,58 @@ def run_incremental_ingest(
     storage: str,
     name: str,
     document_store_path: str,
+    on_progress=None,
 ):
+    """Incrementally ingest entries. If on_progress is supplied it is called
+    with dict events: {event, key, tittel, index, total, message?}."""
+    def _emit(ev):
+        if on_progress:
+            try:
+                on_progress(ev)
+            except Exception:
+                logging.warning("on_progress callback raised", exc_info=True)
+
     # Load + validate — fails here if any file is missing
     entries = _load_and_validate_document_store(document_store_path, name)
 
     processed = _load_processed_doc_ids(storage, name)
-    logging.info("Found %d entries in document store, %d already ingested", len(entries), len(processed))
+    total = len(entries)
+    logging.info("Found %d entries in document store, %d already ingested", total, len(processed))
+    _emit({"event": "start", "total": total, "already_ingested": len(processed)})
 
-    for entry in entries:
+    new_count = 0
+    failed_count = 0
+    for idx, entry in enumerate(entries):
         key = _entry_key(entry)
+        tittel = entry.get("tittel") or key
 
         if key in processed:
             logging.info("Skip (already ingested): %s", key)
+            _emit({"event": "skip", "index": idx, "total": total, "key": key, "tittel": tittel})
             continue
 
-        logging.info("Ingesting: %s", entry.get("tittel") or key)
+        logging.info("Ingesting: %s", tittel)
+        _emit({"event": "doc_start", "index": idx, "total": total, "key": key, "tittel": tittel})
         try:
             pages = load_entry_as_documents(entry)
             logging.info("  → %d document(s) loaded", len(pages))
             _upsert_docs_into_index(name=name, storage=storage, documents=pages)
             processed.add(key)
             _save_processed_doc_ids(storage, name, processed)
+            new_count += 1
             logging.info("  ✓ Done")
+            _emit({"event": "doc_done", "index": idx, "total": total, "key": key, "tittel": tittel})
         except requests.HTTPError as e:
+            failed_count += 1
             logging.warning("  ✗ Skipping %s: %s", key, e)
-        except Exception:
+            _emit({"event": "doc_skipped", "index": idx, "total": total, "key": key, "tittel": tittel, "message": str(e)})
+        except Exception as e:
+            failed_count += 1
             logging.error("  ✗ Failed for %s; will retry on next run", key, exc_info=True)
+            _emit({"event": "doc_failed", "index": idx, "total": total, "key": key, "tittel": tittel, "message": str(e)})
 
-    logging.info("Ingestion complete. Total ingested: %d / %d", len(processed), len(entries))
+    logging.info("Ingestion complete. Total ingested: %d / %d", len(processed), total)
+    _emit({"event": "done", "total": total, "new": new_count, "failed": failed_count, "processed": len(processed)})
 
 
 if __name__ == "__main__":
@@ -351,8 +383,12 @@ if __name__ == "__main__":
     parser.add_argument("--document_store", default="./utils/create_lab_vectorindex/document_store.json", help="Path to document_store.json")
     args = parser.parse_args()
 
-    run_incremental_ingest(
-        storage=args.storage,
-        name=args.name,
-        document_store_path=args.document_store,
-    )
+    try:
+        run_incremental_ingest(
+            storage=args.storage,
+            name=args.name,
+            document_store_path=args.document_store,
+        )
+    except DocumentStoreValidationError as e:
+        # Message was already logged in detail; exit cleanly without a traceback
+        sys.exit(1)

@@ -7,9 +7,9 @@ import sys
 from pathlib import Path
 from openpyxl import load_workbook
 
-XLSX_PATH    = Path(r"C:\Users\ChristianGoulignac\vscode\llama\digiung_lab\utils\create_lab_vectorindex\kilder.xlsx")
+XLSX_PATH    = Path(r"C:\Users\ChristianGoulignac\vscode\llama\digiung_lab-query_server\utils\create_lab_vectorindex\Kilder_2.xlsx")
 OUT_PATH     = Path("./utils/create_lab_vectorindex/document_store_kilder.json")
-INDEX_NAME   = "kilder"
+INDEX_NAME   = "kilder_2"
 FILNAVN_PREFIX = "data\\digiung_lab\\"  # prepended to every filnavn read from the spreadsheet
 
 # Column header (Norwegian) → JSON field
@@ -24,6 +24,7 @@ COLMAP = {
     "Antall deltakere":   "antall_deltakere",
     "Segment":            "segment",
     "Oppsummering":       "oppsummering",
+    "URL":                "kilde_url",
 }
 
 def normalise(v):
@@ -69,7 +70,8 @@ def main():
         rec["filnavn"] = FILNAVN_PREFIX + rec["filnavn"]
         # Ensure all expected keys exist (matching existing file shape)
         for k in ("tittel", "publisert_arstall", "publisert_av", "type_kilde",
-                  "malgruppe", "antall_deltakere", "segment", "oppsummering", "filnavn"):
+                  "malgruppe", "antall_deltakere", "segment", "oppsummering", "filnavn",
+                  "kilde_url"):
             rec.setdefault(k, None)
         entries.append(rec)
 
