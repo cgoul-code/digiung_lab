@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(tasklist /FI \"IMAGENAME eq python.exe\")",
-      "PowerShell(Get-Process python -ErrorAction SilentlyContinue)"
+      "PowerShell(Get-Process python -ErrorAction SilentlyContinue)",
+      "PowerShell($bytes = [System.IO.File]::ReadAllBytes\\('.\\\\requirements.txt'\\); '{0:X2} {1:X2} {2:X2} {3:X2}' -f $bytes[0],$bytes[1],$bytes[2],$bytes[3])"
     ],
     "additionalDirectories": [
       "c:\\Users\\ChristianGoulignac\\vscode\\llama\\digiung_lab-query-client\\src"
