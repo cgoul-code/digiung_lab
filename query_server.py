@@ -61,19 +61,19 @@ logging.basicConfig(
 
 # ── Environment detection ─────────────────────────────────────────────────────
 
-def running_locally() -> bool:
+def RunningLocally():
     if 'WEBSITE_SITE_NAME' in os.environ or 'FUNCTIONS_WORKER_RUNTIME' in os.environ:
         return False
-    print("Running locally", flush=True)
-    return True
+    else:
+        print("Logging info locally")
+        return True
 
-_LOCAL = running_locally()
-_PREFIX = "." if _LOCAL else ""
+_LOCAL = RunningLocally()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-INDEX_STORAGE     = _PREFIX + os.getenv("INDEX_STORAGE", "/blobstorage/chatbot")
-DATA_DIR          = _PREFIX + os.getenv("DATA_DIR",      "/data")
+INDEX_STORAGE     = ("." if RunningLocally() else "") + os.getenv("INDEX_STORAGE", "/blobstorage/chatbot")
+DATA_DIR          = ("." if RunningLocally() else "") + os.getenv("DATA_DIR",      "/data")
 SIMILARITY_TOP_K  = int(os.getenv("SIMILARITY_TOP_K",   "5"))
 SIMILARITY_CUTOFF = float(os.getenv("SIMILARITY_CUTOFF", "0.3"))
 
@@ -340,19 +340,36 @@ async def document_store_filter_options():
     """
     Returns unique dropdown options derived from the index's document_store.json.
     Pass ?index_name=<name> to target a specific index.
+    Uses the requested name as-is — does NOT fall back to another loaded index,
+    which would silently mix in entries from a different dataset.
     """
-    req_index, entry = _resolve_index(request.args.get("index_name"))
+    req_index = (request.args.get("index_name") or "").strip()
+    # Prefer the per-index doc_store_path when the index is loaded, otherwise the global one.
+    entry = _indexes.get(req_index) if req_index else None
     doc_store_path = entry["doc_store_path"] if entry else DOCUMENT_STORE_PATH
-    print(f"[/document-store/filter-options] index={req_index} doc_store_path={doc_store_path}", flush=True)
-    
+    print(f"[/document-store/filter-options] index={req_index!r} doc_store_path={doc_store_path}", flush=True)
+
     if not os.path.isfile(doc_store_path):
         return jsonify({"error": f"document_store.json not found at {doc_store_path}"}), 404
 
+    def _read_strict():
+        with open(doc_store_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data  # legacy flat list — return as-is
+        if not req_index:
+            # No index requested — flatten everything
+            all_entries = []
+            for v in data.values():
+                if isinstance(v, list):
+                    all_entries.extend(v)
+            return all_entries
+        # Strict: return only the entries listed under this index, or empty.
+        return list(data.get(req_index, []))
+
     loop = asyncio.get_event_loop()
     try:
-        entries = await loop.run_in_executor(
-            None, _read_doc_store_entries, doc_store_path, req_index or ""
-        )
+        entries = await loop.run_in_executor(None, _read_strict)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
