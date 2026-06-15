@@ -935,37 +935,262 @@
       "method": "GET"
     },
     {
-      "tittel": "Beskrivelse av vektorindeksen og hvilke temaer som er dekket",
-      "filnavn": "data\\hvaerinnafor\\hvaerinnafor_beskrivelse.pdf",
-      "publisert_arstall": null,
-      "publisert_av": "",
-      "type_kilde": "",
-      "malgruppe": "",
-      "antall_deltakere": null,
-      "segment": "",
-      "oppsummering": ""
-    }
-  ],
-  "helsenorge_artikler": [
-    {
-      "url": "https://www.helsenorge.no/sykdom-og-kritisk-info/om/",
-      "tittel": "Om sykdomer og kristisk info",
+      "url": "https://www.ung.no/Homofil/4638_–_Jeg_tør_ikke_å_«komme_ut_av_skapet».html",
       "method": "GET"
     },
     {
-      "url": "https://www.helsenorge.no/barn/spedbarnsmat-og-amming/amming-og-legemidler/",
-      "tittel": "Amming og legemidler",
+      "url": "https://www.ung.no/Homofil/636_Ordliste_LHBTIQ.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/Homofil/4637_Er_jeg_skeiv_Og_må_jeg_fortelle_det_til_andre.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/Homofil/4257_Aseksuell_eller_aromantisk.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/Sex/3789_Hvordan_har_homofile_sex_sammen.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/Homofil/3214_Hva_betyr_regnbueflagget.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/jeg-er-skeiv",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/Homofil/4263_Ung,_skeiv_og_funksjonshemmet.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/Homofil/4636_Krysskulturell_eller_religiøs_og_skeiv.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/Homofil/1757_Homofobi_og_diskriminering_av_skeive.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/hvorfor-feirer-vi-pride",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/Sex/3394_Kjønnsorganet_ditt_er_topp.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/penis-og-pung/2653_Penisutvikling_og_penisstørrelse.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/penis-og-pung/4021_Små_og_store_penisplager.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/penis-og-pung/1840_Trang_forhud.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/penis-og-pung/4180_Kåt,_men_får_ikke_ereksjon.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/4290_Lukt_fra_underlivet.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/vulva-og-vagina/4051_Alt_om_fitte,_vulva_og_vagina.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/vulva-og-vagina/942_Hva_skjer_ved_gynekologisk_undersøkelse.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/vulva-og-vagina/4048_Små_og_store_plager_i_vulva_og_vagina.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/vulva-og-vagina/3391_Normale_eller_unormale_kjønnslepper.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/vulva-og-vagina/2616_Utflod_–_til_nytte_og_bekymring.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/vulva-og-vagina/3014_Myten_om_jomfruhinna.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/vulva-og-vagina/4028_Har_du_smerter_i_vulva.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/pubertet/4140_Gutter_og_puberteten.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/pubertet/4137_Jenter_og_puberteten.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/pubertet/4366_Hjelp,_jeg_har_ikke_kommet_i_puberteten.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/pubertet/2245_Svette.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/pubertet/4344_Er_du_i_puberteten_og_tenker_mye_på_sex.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/Sex/4053_Ofte_og_plutselig_ereksjon.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/pubertet/1866_Hva_skjer_i_puberteten.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/mensen/1556_Mensen_–_sånn_er_det.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/mensen/4077_Når_kommer_mensen_første_gang.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/mensen/4126_Alt_om_bind,_tampong_og_menskopp.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/mensen/4313_Mensen_har_ikke_kommet_til_tiden.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/mensen/2666_Hjelp,_jeg_har_mensensmerter.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/kropp/mensen/2606_Å_nei,_ikke_mensen_nå.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/hva-skjer-med-hjernen-i-puberteten",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/helsa-di/kjonnssykdommer/1921_Kan_jeg_ha_en_kjønnssykdom.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/helsa-di/kjonnssykdommer/3663_Smittet_med_kjønnssykdom_-_Hva_nå.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/hva-er-gonore",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/helsa-di/kjonnssykdommer/1835_Fakta_om_klamydia.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/helsa-di/4645_Det_klør_Har_jeg_fått_skabb.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/helsa-di/2486_HPV-virus_og_livmorhalskreft.html",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/hva-er-kjønnsvorter",
+      "method": "GET"
+    },
+    {
+      "url": "https://www.ung.no/helsa-di/kjonnssykdommer/2054_Herpes_–_munnherpes_og_kjønnsherpes.html",
       "method": "GET"
     }
   ],
-  "Min_test_indeks": [
+  "Strategisk_risiko": [
     {
-      "url": "https://www.helsenorge.no/sykdom/muskel-og-skjelett/leggkramper/",
-      "tittel": "Artikkel om leggkramper",
-      "publisert_av": "Helsenorge",
+      "url": "https://www.regjeringen.no/contentassets/7400c9d08a5543b8912fbf700f3344fd/no/pdfs/stm202320240031000dddpdfs.pdf",
+      "method": "GET",
+      "tittel": "Perspektivmeldingen 2024",
+      "type_kilde": "Stortingsmelding",
+      "publisert_av": "Finansdepartementet",
+      "publisert_arstall": 2024,
+      "kilde_url": "https://www.regjeringen.no/contentassets/7400c9d08a5543b8912fbf700f3344fd/no/pdfs/stm202320240031000dddpdfs.pdf"
+    },
+    {
+      "url": "https://www.regjeringen.no/no/aktuelt/nasjonal-helse-og-samhandlingsplan-2024-2027-kortere-ventetider-og-en-felles-helsetjeneste/id3028011/",
+      "method": "GET",
+      "tittel": "Nasjonal helse- og samhandlingsplan",
+      "type_kilde": "Nasjonal plan",
+      "publisert_av": "Helse- og omsorgsdepartementet",
+      "publisert_arstall": 2024,
+      "kilde_url": "https://www.regjeringen.no/no/aktuelt/nasjonal-helse-og-samhandlingsplan-2024-2027-kortere-ventetider-og-en-felles-helsetjeneste/id3028011/"
+    },
+    {
+      "url": "https://www.regjeringen.no/no/dokumenter/nasjonal-sikkerhetsstrategi/id3099304/",
+      "method": "GET",
+      "tittel": "Nasjonal sikkerhetsstrategi",
+      "type_kilde": "Strategi",
+      "publisert_av": "Regjeringen",
+      "publisert_arstall": null,
+      "kilde_url": "https://www.regjeringen.no/no/dokumenter/nasjonal-sikkerhetsstrategi/id3099304/"
+    },
+    {
+      "url": "https://www.regjeringen.no/no/tema/statlig-forvaltning/it-politikk/ny-nasjonal-digitaliseringsstrategi/id2982892/",
+      "method": "GET",
+      "tittel": "Digitaliseringstrategien",
+      "type_kilde": "Strategi",
+      "publisert_av": "Digitaliserings- og forvaltningsdepartementet",
+      "publisert_arstall": null,
+      "kilde_url": "https://www.regjeringen.no/no/tema/statlig-forvaltning/it-politikk/ny-nasjonal-digitaliseringsstrategi/id2982892/"
+    },
+    {
+      "url": "https://www.regjeringen.no/contentassets/bef16daa907049d7a72170104eb88bae/no/pdfs/handlingsplan-kliniskestudier.pdf",
+      "method": "GET",
+      "tittel": "Nasjonal handlingsplan for kliniske studier og klinisk forskning",
+      "type_kilde": "Handlingsplan",
+      "publisert_av": "Helse- og omsorgsdepartementet",
+      "publisert_arstall": null,
+      "kilde_url": "https://www.regjeringen.no/contentassets/bef16daa907049d7a72170104eb88bae/no/pdfs/handlingsplan-kliniskestudier.pdf"
+    },
+    {
+      "url": "https://www.regjeringen.no/no/dokumenter/meld.-st.-9-20242025/id3082364/",
+      "method": "GET",
+      "tittel": "Totalberedskapsmeldingen",
+      "type_kilde": "Stortingsmelding",
+      "publisert_av": "Justis- og beredskapsdepartementet",
+      "publisert_arstall": 2024,
+      "kilde_url": "https://www.regjeringen.no/no/dokumenter/meld.-st.-9-20242025/id3082364/"
+    },
+    {
+      "url": "https://www.regjeringen.no/no/dokumenter/meld.-st.-5-20232024/id3015776/",
+      "method": "GET",
+      "tittel": "Helseberedskapsmeldingen",
+      "type_kilde": "Stortingsmelding",
+      "publisert_av": "Helse- og omsorgsdepartementet",
       "publisert_arstall": 2023,
-      "type_kilde": "Artikkel",
-      "method": "GET"
+      "kilde_url": "https://www.regjeringen.no/no/dokumenter/meld.-st.-5-20232024/id3015776/"
+    },
+    {
+      "url": "https://www.regjeringen.no/no/aktuelt/skal-gjore-norge-mer-motstandsdyktig-tre-kritiske-samfunnsomrader-prioriteres-i-den-forste-langtidsplanen-for-sivil-beredskap/id3144406/",
+      "method": "GET",
+      "tittel": "Den kommende langtidsplanen for sivil beredskap - Forventet i 2026",
+      "type_kilde": "Nasjonal plan",
+      "publisert_av": "Justis- og beredskapsdepartementet",
+      "publisert_arstall": null,
+      "kilde_url": "https://www.regjeringen.no/no/aktuelt/skal-gjore-norge-mer-motstandsdyktig-tre-kritiske-samfunnsomrader-prioriteres-i-den-forste-langtidsplanen-for-sivil-beredskap/id3144406/"
     }
   ]
 }

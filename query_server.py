@@ -81,6 +81,11 @@ SIMILARITY_CUTOFF = float(os.getenv("SIMILARITY_CUTOFF", "0.3"))
 _doc_store_env = os.getenv("DOCUMENT_STORE_PATH")
 DOCUMENT_STORE_PATH = _doc_store_env or "./utils/create_lab_vectorindex/document_store.json"
 
+# Editable per-query-type prompt overrides (persisted + mirrored to blob).
+PROMPTS_STORE_PATH = os.getenv("PROMPTS_STORE_PATH") or "./utils/create_lab_vectorindex/query_type_prompts.json"
+PROMPTS_BLOB_NAME = "query_type_prompts.json"
+EDITABLE_PROMPT_FIELDS = ("extract_system", "extract_prompt", "aggregate_system", "aggregate_prompt")
+
 print(f"[config] LOCAL={_LOCAL}", flush=True)
 print(f"[config] INDEX_STORAGE={INDEX_STORAGE}", flush=True)
 print(f"[config] DATA_DIR={DATA_DIR}", flush=True)
@@ -191,6 +196,10 @@ async def _load_all_indexes_async():
             None,
             azure_blob.bootstrap_download,
             INDEX_STORAGE, DATA_DIR, DOCUMENT_STORE_PATH,
+        )
+        # Pull persisted prompt overrides too (best-effort; absent on first run).
+        await loop.run_in_executor(
+            None, azure_blob.download_file, PROMPTS_BLOB_NAME, PROMPTS_STORE_PATH,
         )
 
     if not os.path.isdir(INDEX_STORAGE):
@@ -411,7 +420,7 @@ async def list_indexes():
 
 @app.get("/query-types")
 async def query_types():
-    return jsonify(QUERY_TYPES)
+    return jsonify(_effective_query_types())
 
 
 @app.get("/index/info")
@@ -553,6 +562,8 @@ def _parse_aggregate_body(body):
         "chunks_per_doc":int(body.get("chunks_per_doc", 4)),
         "filters":       body.get("filters") or {},
         "index_name":    body.get("index_name", ""),
+        # Cross-document syntese is opt-in; per-document analysis is always returned.
+        "include_aggregate": bool(body.get("include_aggregate", True)),
     }
 
 
@@ -610,6 +621,8 @@ async def aggregate_stream():
                 "index_name": index_name,
                 "index": entry["index"], "llm": _extract_llm,
                 "extract_llm": _extract_llm, "aggregate_llm": _aggregate_llm,
+                # Effective (possibly user-edited) prompts for this query type.
+                "query_type_cfg": _effective_cfg(params["query_type"]),
                 "documents": [], "per_doc_findings": [], "result": None,
                 "event_queue": QueueProxy(),
                 "cancel_event": cancel_event,
@@ -626,10 +639,11 @@ async def aggregate_stream():
                     "publisert_av":      f.publisert_av,
                     "publisert_arstall": f.publisert_arstall,
                     "findings":          f.findings,
+                    "structured":        f.structured,
                     "chunks":            [{"page": c.page, "excerpt": c.excerpt} for c in f.chunks],
                 }
                 for f in (final.get("per_doc_findings") or [])
-                if f.findings
+                if f.findings or f.structured
             ]
             loop.call_soon_threadsafe(_emit_job, {
                 "event":            "result",
@@ -722,10 +736,120 @@ def _add_hyperlink(paragraph, url: str, text: str):
     return hyperlink
 
 
+def _add_bullets(doc, label: str, values, style: str = "List Bullet"):
+    """Add an optional bold label followed by a bulleted list. No-op if empty."""
+    values = [v for v in (values or []) if str(v).strip()]
+    if not values:
+        return
+    if label:
+        doc.add_paragraph(label).runs[0].bold = True
+    for v in values:
+        doc.add_paragraph(_xml_safe(str(v)), style=style)
+
+
+def _source_labels(sources) -> str:
+    """Render an aggregate item's 'sources' (dicts or strings) as 'Tittel (s. 1, 2)'."""
+    labels = []
+    for s in sources or []:
+        if isinstance(s, dict):
+            tittel = s.get("tittel") or ""
+            pages = s.get("pages") or []
+            labels.append(tittel + (f" (s. {', '.join(str(pg) for pg in pages)})" if pages else ""))
+        else:
+            labels.append(str(s))
+    return "; ".join(_xml_safe(l) for l in labels)
+
+
+def _doc_heading_with_link(doc, entry: dict):
+    """Add a level-3 doc heading 'Tittel - Utgiver - Årstall', hyperlinked if kilde_url."""
+    tittel_text = _xml_safe(entry.get("tittel") or entry.get("filename", ""))
+    publisert_av = _xml_safe((entry.get("publisert_av") or "").strip())
+    publisert_arstall = entry.get("publisert_arstall")
+    arstall_text = _xml_safe(str(publisert_arstall)) if publisert_arstall not in (None, "") else ""
+    parts = [tittel_text]
+    if publisert_av:
+        parts.append(publisert_av)
+    if arstall_text:
+        parts.append(arstall_text)
+    heading_label = " - ".join(parts)
+    kilde_url = (entry.get("kilde_url") or "").strip()
+    heading_p = doc.add_heading("", level=3)
+    if kilde_url:
+        _add_hyperlink(heading_p, kilde_url, heading_label)
+    else:
+        heading_p.add_run(heading_label)
+
+
+def _add_chunk_references(doc, chunks):
+    """Render retrieved source chunks as page-labelled excerpts."""
+    chunks = chunks or []
+    if not chunks:
+        return
+    doc.add_paragraph("Kildehenvisninger:", style="Intense Quote")
+    for chunk in chunks:
+        page = chunk.get("page")
+        excerpt = _xml_safe((chunk.get("excerpt") or "").strip())
+        label = f"[Side {page}]  " if page is not None else ""
+        p = doc.add_paragraph(style="List Bullet 2")
+        if label:
+            p.add_run(label).bold = True
+        p.add_run(excerpt)
+
+
+def _render_risk_report(doc, result: dict, items: list, per_doc: list):
+    """Render the strategisk_risiko report: optional cross-document syntese (longlist)
+    followed by the always-present per-document analysekjede."""
+    # ── Syntese på tvers (longlist) — only when aggregation ran and produced content ──
+    if result.get("aggregated") and (items or result.get("monstre")):
+        doc.add_heading("Syntese på tvers (longlist)", level=2)
+        _add_bullets(doc, "Overordnede mønstre:", result.get("monstre"))
+        for item in items:
+            doc.add_heading(_xml_safe(item.get("label", "")), level=3)
+            if item.get("beskrivelse"):
+                doc.add_paragraph(_xml_safe(item["beskrivelse"]))
+            _add_bullets(doc, "Drivere:",       item.get("drivere"))
+            _add_bullets(doc, "Sårbarheter:",    item.get("sarbarheter"))
+            _add_bullets(doc, "Konsekvenser:",   item.get("konsekvenser"))
+            _add_bullets(doc, "Risikoer:",       item.get("risikoer"))
+            if item.get("sources"):
+                p = doc.add_paragraph("Kilder: ")
+                p.add_run(_source_labels(item["sources"])).italic = True
+        _add_bullets(doc, "Usikkerhet og kunnskapshull:", result.get("usikkerhet_kunnskapshull"))
+        _add_bullets(doc, "Spørsmål til ledergruppen:",   result.get("sporsmal_til_ledergruppen"))
+
+    # ── Analyse per dokument — alltid ──
+    if per_doc:
+        doc.add_heading("Analyse per dokument", level=2)
+        for entry in per_doc:
+            _doc_heading_with_link(doc, entry)
+            s = entry.get("structured") or {}
+            if s.get("relevans"):
+                p = doc.add_paragraph()
+                p.add_run("Relevans: ").bold = True
+                p.add_run(_xml_safe(s["relevans"]))
+            _add_bullets(doc, "Kildefunn:",            s.get("kildefunn"))
+            _add_bullets(doc, "Drivere:",              s.get("drivere"))
+            _add_bullets(doc, "Mulige sårbarheter:",   s.get("sarbarheter"))
+            _add_bullets(doc, "Mulige konsekvenser:",  s.get("konsekvenser"))
+            _add_bullets(doc, "Foreløpige risikoer:",  s.get("risikoer"))
+            _add_bullets(doc, "Avklaringsspørsmål:",   s.get("avklaringssporsmal"))
+            if s.get("kildegrunnlag_styrke"):
+                p = doc.add_paragraph()
+                p.add_run("Kildegrunnlagets styrke: ").bold = True
+                p.add_run(_xml_safe(s["kildegrunnlag_styrke"]))
+            if not s:  # defensive fallback
+                for finding in entry.get("findings", []):
+                    doc.add_paragraph(_xml_safe(finding), style="List Bullet")
+            _add_chunk_references(doc, entry.get("chunks"))
+
+
 def _generate_report_docx(result: dict) -> bytes:
     from docx import Document
 
-    OUTPUT_KEYS = {"problems": "problems", "moments": "moments", "personas": "personas", "free": "findings"}
+    OUTPUT_KEYS = {
+        "problems": "problems", "moments": "moments", "personas": "personas",
+        "free": "findings", "strategisk_risiko": "risikoomrader",
+    }
 
     doc     = Document()
     qt      = result.get("query_type", "")
@@ -745,6 +869,12 @@ def _generate_report_docx(result: dict) -> bytes:
         f"{result.get('documents_with_findings', 0)} med funn · "
         f"{len(items)} resultater"
     )
+
+    if qt == "strategisk_risiko":
+        _render_risk_report(doc, result, items, per_doc)
+        buf = BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
 
     if items:
         doc.add_heading("Aggregerte funn", level=2)
@@ -882,6 +1012,54 @@ def _entry_admin_key(entry: dict) -> str:
     return entry.get("url") or entry.get("filnavn") or ""
 
 
+# ── Query-type prompt overrides ───────────────────────────────────────────────
+# Stored as {query_type: {field: text}} — only fields that differ from the
+# built-in QUERY_TYPES defaults are kept, so deleting an entry resets to default.
+_prompts_lock = threading.Lock()
+
+
+def _load_prompt_overrides() -> dict:
+    if not os.path.isfile(PROMPTS_STORE_PATH):
+        return {}
+    try:
+        with open(PROMPTS_STORE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as e:
+        logging.warning("Could not read prompt overrides at %s: %s", PROMPTS_STORE_PATH, e)
+        return {}
+
+
+def _save_prompt_overrides(data: dict) -> None:
+    os.makedirs(os.path.dirname(PROMPTS_STORE_PATH), exist_ok=True)
+    tmp = PROMPTS_STORE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, PROMPTS_STORE_PATH)
+    # Mirror to blob (no-op outside Azure)
+    azure_blob.upload_file(PROMPTS_STORE_PATH, PROMPTS_BLOB_NAME)
+
+
+def _effective_query_types() -> dict:
+    """Built-in QUERY_TYPES with persisted overrides applied to the editable fields."""
+    overrides = _load_prompt_overrides()
+    effective = {}
+    for qt, cfg in QUERY_TYPES.items():
+        merged = dict(cfg)
+        ov = overrides.get(qt) or {}
+        for field in EDITABLE_PROMPT_FIELDS:
+            v = ov.get(field)
+            if isinstance(v, str) and v.strip():
+                merged[field] = v
+        effective[qt] = merged
+    return effective
+
+
+def _effective_cfg(query_type: str) -> dict:
+    eff = _effective_query_types()
+    return eff.get(query_type) or eff.get("free")
+
+
 @app.post("/admin/indexes")
 async def admin_create_index():
     """Create a new (empty) index entry in document_store.json.
@@ -906,6 +1084,46 @@ async def admin_create_index():
         _save_full_doc_store(data)
 
     return jsonify({"ok": True, "name": name})
+
+
+@app.put("/admin/query-types/<qt>")
+async def admin_update_query_type(qt):
+    """Save edited prompt text for a query type. Only fields that differ from the
+    built-in default are persisted; an empty/default value clears that override."""
+    if qt not in QUERY_TYPES:
+        return jsonify({"error": f"Unknown query_type: {qt}"}), 404
+    body = await request.get_json(force=True) or {}
+    incoming = {k: body[k] for k in EDITABLE_PROMPT_FIELDS if isinstance(body.get(k), str)}
+    if not incoming:
+        return jsonify({"error": "No editable prompt fields in body"}), 400
+
+    with _prompts_lock:
+        data = _load_prompt_overrides()
+        current = dict(data.get(qt) or {})
+        for field, value in incoming.items():
+            if value.strip() and value != QUERY_TYPES[qt].get(field):
+                current[field] = value
+            else:
+                current.pop(field, None)  # matches default → drop the override
+        if current:
+            data[qt] = current
+        else:
+            data.pop(qt, None)
+        _save_prompt_overrides(data)
+
+    return jsonify({"ok": True, "query_type": qt, "effective": _effective_cfg(qt)})
+
+
+@app.delete("/admin/query-types/<qt>")
+async def admin_reset_query_type(qt):
+    """Reset a query type's prompts to the built-in defaults."""
+    if qt not in QUERY_TYPES:
+        return jsonify({"error": f"Unknown query_type: {qt}"}), 404
+    with _prompts_lock:
+        data = _load_prompt_overrides()
+        existed = data.pop(qt, None) is not None
+        _save_prompt_overrides(data)
+    return jsonify({"ok": True, "query_type": qt, "reset": existed, "effective": _effective_cfg(qt)})
 
 
 @app.get("/admin/entries")

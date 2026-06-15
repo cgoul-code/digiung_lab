@@ -77,12 +77,15 @@ class DocumentStoreValidationError(Exception):
     """Raised when document_store.json is missing, malformed, or references missing files."""
 
 
-def _load_and_validate_document_store(json_path: str, index_name: str) -> list[dict]:
+def _load_and_validate_document_store(json_path: str, index_name: str, check_urls: bool = True) -> list[dict]:
     """
-    Load document_store.json and verify every file listed actually exists.
+    Load document_store.json and verify every entry up front:
+      - file entries  → the file must exist on disk
+      - url entries   → the URL must be reachable (when check_urls is True)
     Supports both the legacy flat-list format and the new dict-of-lists format:
       {"IndexName": [...], "OtherIndex": [...]}
-    Raises DocumentStoreValidationError with a detailed message if anything is wrong.
+    Raises DocumentStoreValidationError with a detailed message if anything is wrong,
+    so ingestion aborts before any document is processed.
     """
     if not os.path.isfile(json_path):
         raise DocumentStoreValidationError(f"document_store.json not found at: {json_path}")
@@ -124,8 +127,70 @@ def _load_and_validate_document_store(json_path: str, index_name: str) -> list[d
             logging.error(line)
         raise DocumentStoreValidationError(msg)
 
+    if check_urls:
+        _validate_urls(entries)
+
     logging.info("All %d entries verified.", len(entries))
     return entries
+
+
+def _check_url(url: str, timeout: int = 15) -> tuple[bool, str]:
+    """Return (ok, detail) for a single URL.
+    SPA topic URLs are validated by extracting the topic (raises if it's gone);
+    plain URLs are checked with HEAD, falling back to GET for servers that reject HEAD.
+    """
+    headers = {"User-Agent": "Mozilla/5.0 (digiung-lab-ingest)"}
+    try:
+        fragment = urlsplit(url).fragment
+        if fragment and "/temabeskrivelse/" in fragment:
+            # Confirms the parent page still contains this topic (also warms the cache).
+            _spa_topic_text(url)
+            return True, "ok"
+
+        resp = requests.head(url, timeout=timeout, allow_redirects=True, headers=headers)
+        if resp.status_code >= 400:
+            # Many servers don't allow HEAD (403/405) — retry with a lightweight GET.
+            resp = requests.get(url, timeout=timeout, allow_redirects=True, headers=headers, stream=True)
+            resp.close()
+        if resp.status_code >= 400:
+            return False, f"HTTP {resp.status_code}"
+        return True, "ok"
+    except requests.RequestException as e:
+        return False, str(e)
+    except Exception as e:
+        return False, str(e)
+
+
+def _validate_urls(entries: list[dict], timeout: int = 15) -> None:
+    """Check that every url entry is reachable. Raises DocumentStoreValidationError
+    listing all bad links, so ingestion stops before doing any work."""
+    url_entries = [e for e in entries if e.get("url")]
+    if not url_entries:
+        return
+
+    logging.info("Validating %d URL(s) in document_store.json ...", len(url_entries))
+    bad: list[tuple[str, str]] = []
+    for e in url_entries:
+        url = e["url"]
+        ok, detail = _check_url(url, timeout=timeout)
+        if ok:
+            logging.info("  ✓ %s", url)
+        else:
+            logging.error("  ✗ %s — %s", url, detail)
+            bad.append((url, detail))
+
+    if bad:
+        bullet_list = "\n".join(f"  ✗ {u} — {d}" for u, d in bad)
+        msg = (
+            f"{len(bad)} URL(s) in document_store.json are not reachable:\n"
+            f"{bullet_list}\n"
+            f"Fix or remove these URLs and rerun."
+        )
+        for line in msg.splitlines():
+            logging.error(line)
+        raise DocumentStoreValidationError(msg)
+
+    logging.info("All %d URL(s) reachable.", len(url_entries))
 
 
 def _entry_key(entry: dict) -> str:
@@ -323,6 +388,7 @@ def run_incremental_ingest(
     name: str,
     document_store_path: str,
     on_progress=None,
+    check_urls: bool = True,
 ):
     """Incrementally ingest entries. If on_progress is supplied it is called
     with dict events: {event, key, tittel, index, total, message?}."""
@@ -333,8 +399,8 @@ def run_incremental_ingest(
             except Exception:
                 logging.warning("on_progress callback raised", exc_info=True)
 
-    # Load + validate — fails here if any file is missing
-    entries = _load_and_validate_document_store(document_store_path, name)
+    # Load + validate — fails here if any file is missing or any URL is unreachable
+    entries = _load_and_validate_document_store(document_store_path, name, check_urls=check_urls)
 
     processed = _load_processed_doc_ids(storage, name)
     total = len(entries)
@@ -381,6 +447,7 @@ if __name__ == "__main__":
     parser.add_argument("--storage",        default="./blobstorage/chatbot",                          help="Root storage folder for the index")
     parser.add_argument("--name",           default="DigiUng_lab",                                            help="Index name (subfolder under storage)")
     parser.add_argument("--document_store", default="./utils/create_lab_vectorindex/document_store.json", help="Path to document_store.json")
+    parser.add_argument("--no-url-check", dest="check_urls", action="store_false", help="Skip the up-front reachability check of url entries")
     args = parser.parse_args()
 
     try:
@@ -388,6 +455,7 @@ if __name__ == "__main__":
             storage=args.storage,
             name=args.name,
             document_store_path=args.document_store,
+            check_urls=args.check_urls,
         )
     except DocumentStoreValidationError as e:
         # Message was already logged in detail; exit cleanly without a traceback

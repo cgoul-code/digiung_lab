@@ -46,3 +46,53 @@ Required env vars on App Service:
 - `CONNECTION_STRING` — storage account connection string
 - `CONTAINER_NAME` — blob container name (e.g. `chatbot`)
 - plus the existing Azure OpenAI vars
+
+## Redigerbare prompts per rapporttype
+
+Hver analysetype (`query_type`: `problems`, `moments`, `personas`, `free`,
+`strategisk_risiko`) har fire prompt-felter som kan redigeres fra klienten:
+`extract_system`, `extract_prompt`, `aggregate_system`, `aggregate_prompt`.
+
+### Standard + overstyring
+
+Kode-standardene ligger i `QUERY_TYPES` i `aggregate_workflow.py` og er alltid
+fasit. Redigeringer lagres som **overstyringer oppå** standardene — kun feltene
+som faktisk avviker — i `query_type_prompts.json`:
+
+```
+./utils/create_lab_vectorindex/query_type_prompts.json   # lokal sti (PROMPTS_STORE_PATH)
+query_type_prompts.json                                  # blob-rot (kun i Azure)
+```
+
+De strukturelle feltene (`output_key`, `structured`) kan **ikke** endres — de er
+bundet til koden og rapport-/klientrendringen.
+
+### Slik virker det
+
+- **Redigere/lagre:** klient → `PUT /admin/query-types/<query_type>` med de fire
+  feltene. Felter som er tomme eller lik standarden lagres ikke (holder
+  overstyringsfila minimal).
+- **Tilbakestille:** klient → `DELETE /admin/query-types/<query_type>` sletter
+  overstyringen, slik at kode-standarden gjelder igjen.
+- **Lesing:** `GET /query-types` returnerer alltid de *effektive* promptene
+  (standard + overstyringer). Analysen bruker samme effektive konfigurasjon, som
+  leses ferskt for hvert kall — ingen server-restart nødvendig.
+- **Plassholdere må beholdes:** `{question}`, `{tittel}`, `{context}` i
+  extract-promptene og `{question}`, `{n_docs}`, `{all_findings}` (+ `{n_personas}`
+  for personas) i aggregate-promptene. Fjernes en påkrevd plassholder, feiler
+  `.format()` ved kjøring. (Det er foreløpig ingen server-side validering av dette.)
+
+I klienten finnes editoren under **Avansert → «Rediger prompts»** i aggregate-modus.
+
+### Lokal vs. Azure-lagring
+
+- **Lokalt** (standard, `WEBSITE_SITE_NAME` ikke satt): lagring skriver kun til
+  den lokale `query_type_prompts.json`. Blob-speiling er en no-op. Fila dukker
+  opp i `git status` — bestem om den skal committes (delte standard-overstyringer)
+  eller ligge i `.gitignore` (kun lokal eksperimentering).
+- **Azure** (eller lokalt med `USE_BLOB_INDEXES=true`): fila lastes ned fra
+  blob-containeren ved oppstart, og hver lagring speiles tilbake til blob. Med
+  `USE_BLOB_INDEXES=true` lokalt redigerer du altså **produksjonsdataene**.
+
+Her er kommandoen. document_store.json lastes opp som én fil til blob-roten, og koden har allerede en hjelper for det:
+.\.venv\Scripts\python.exe -c "from dotenv import load_dotenv, find_dotenv; load_dotenv(find_dotenv()); import os; os.environ['USE_BLOB_INDEXES']='true'; import azure_blob; print('container=', azure_blob.CONTAINER_NAME, 'enabled=', azure_blob.ENABLED); print('OK opplastet' if azure_blob.upload_document_store('./utils/create_lab_vectorindex/document_store.json') else 'FEILET — sjekk CONNECTION_STRING/CONTAINER_NAME')"

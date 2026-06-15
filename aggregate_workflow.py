@@ -157,6 +157,75 @@ Gi et strukturert svar på spørsmålet.""",
 
         "output_key": "findings",
     },
+
+    # Strategisk risiko for Helsedirektoratet (Plan & styring).
+    # "structured": True → extract/aggregate produce JSON objects (not bullet lists)
+    # following the analysekjeden: kildefunn → driver → sårbarhet → konsekvens → risiko.
+    "strategisk_risiko": {
+        "structured": True,
+
+        "extract_system": """Du er en analyseassistent for strategisk risikoanalyse i Helsedirektoratet.
+Du analyserer ett kildedokument om gangen (årsrapporter, tildelingsbrev, hovedinstruks, strategi, riksrevisjonsrapport o.l.) og utleder mulige strategiske risikoer.
+
+Begrepsapparat du SKAL holde adskilt:
+- Driver: et eksternt utviklingstrekk, styringskrav eller rammevilkår som kan påvirke direktoratets oppdrag, handlingsrom, prioriteringer eller måloppnåelse over tid. En driver er IKKE en risiko i seg selv.
+- Sårbarhet: et forhold ved direktoratets ansvar, rolle, kapasitet, kompetanse, styring, samhandling, data, teknologi, regelverksetterlevelse eller avhengigheter som kan svekke evnen til å møte en driver.
+- Konsekvens: hva det kan bety for måloppnåelse, samfunnsoppdrag, ressursbruk, styring og kontroll, sikkerhet, beredskap, legitimitet eller tillit.
+- Risiko: en usikkerhet som kan påvirke direktoratets evne til å ivareta samfunnsoppdrag, måloppnåelse, styringskrav eller prioriteringsevne over 3-5 år. Risiko oppstår når en driver møter en sårbarhet og kan gi vesentlig konsekvens.
+
+Arbeid etter analysekjeden: kildefunn -> driver -> relevans -> sårbarhet -> konsekvens -> risiko -> avklaringsspørsmål.
+Bruk et nøkternt, presist og direktoratstilpasset språk. Unngå konsulentspråk, dramatisering og bastante konklusjoner. Ikke foreslå tiltak. Ikke forveksle drivere, sårbarheter, konsekvenser og risiko. Ikke gjør operative forhold strategiske uten å forklare hvorfor de har strategisk betydning.
+
+Svar KUN med gyldig JSON i dette formatet (ingen tekst utenfor JSON):
+{
+  "relevant": true,
+  "relevans": "kort vurdering av dokumentets relevans for strategisk risiko",
+  "kildefunn": ["det dokumentet faktisk sier, direkte forankret i kilden"],
+  "drivere": ["mulige strategiske drivere"],
+  "sarbarheter": ["mulige sårbarheter som bør undersøkes, formulert som hypoteser/spørsmål"],
+  "konsekvenser": ["mulige konsekvenser"],
+  "risikoer": ["foreløpige strategiske risikoer, formulert som usikkerhet over 3-5 år"],
+  "avklaringssporsmal": ["spørsmål til videre avklaring"],
+  "kildegrunnlag_styrke": "kort vurdering av hvor sterkt kildegrunnlaget er"
+}
+Hvis dokumentet ikke er relevant for strategisk risiko, svar: {"relevant": false}.""",
+
+        "extract_prompt": """Spørsmål/fokus: {question}
+
+Dokumenttittel: {tittel}
+{context}
+
+Analyser dette dokumentet etter analysekjeden og svar med JSON som beskrevet.""",
+
+        "aggregate_system": """Du er analytiker i risikoteamet. Du får analyser per dokument og skal lage en syntese på tvers - en longlist over mulige strategiske risikoområder.
+Identifiser mønstre, slå sammen overlappende funn, og hold driver/sårbarhet/konsekvens/risiko adskilt. Oppgi hvilke kilder (titler) som peker i samme retning.
+Bruk et nøkternt, presist og direktoratstilpasset språk. Ikke foreslå tiltak.
+
+Svar KUN med gyldig JSON i dette formatet (ingen tekst utenfor JSON):
+{{
+  "monstre": ["overordnede mønstre på tvers av dokumentene"],
+  "temaer": [
+    {{
+      "label": "Kort navn på risikoområde/tema",
+      "beskrivelse": "1-3 setninger",
+      "drivere": ["drivere som støtter temaet"],
+      "sarbarheter": ["mulige sårbarheter som bør undersøkes"],
+      "konsekvenser": ["mulige konsekvenser"],
+      "risikoer": ["foreløpige strategiske risikoer"],
+      "sources": ["Tittel1", "Tittel2"]
+    }}
+  ],
+  "usikkerhet_kunnskapshull": ["usikkerhet og kunnskapshull"],
+  "sporsmal_til_ledergruppen": ["spørsmål til ledergruppen"]
+}}""",
+
+        "aggregate_prompt": """Spørsmål/fokus: {question}
+Analyser per dokument fra {n_docs} dokumenter:
+{all_findings}
+Lag en syntese på tvers (longlist) som beskrevet.""",
+
+        "output_key": "risikoomrader",
+    },
 }
 
 
@@ -173,12 +242,15 @@ class DocFindings(BaseModel):
     publisert_av:       str            = ""
     publisert_arstall:  Optional[int]  = None
     findings:           list[str]      = Field(default_factory=list)
+    structured:         Optional[dict] = None   # set for "structured" query types
     chunks:             list[ChunkRef] = Field(default_factory=list)
 
 class AggregateState(TypedDict):
     question: str
-    query_type: str                     # "problems" | "moments" | "personas" | "free"
+    query_type: str                     # "problems" | "moments" | "personas" | "free" | "strategisk_risiko"
+    query_type_cfg: Any                 # effective (possibly user-edited) prompt config; falls back to QUERY_TYPES
     n_personas: int                     # only used for query_type="personas"
+    include_aggregate: bool             # run cross-document syntese (default True)
     document_store_path: str
     index_name: str                     # key into document_store.json when format is a dict
     index: Any
@@ -226,6 +298,16 @@ def _read_doc_store_entries(path: str, index_name: str) -> list[dict]:
     return all_entries
 
 
+def _parse_json_block(raw: str) -> dict:
+    """Parse a JSON object from an LLM response, tolerating ```json fences."""
+    raw = (raw or "").strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    return json.loads(raw.strip())
+
+
 def load_documents(state: AggregateState) -> dict:
     path       = state["document_store_path"]
     index_name = state.get("index_name", "")
@@ -267,7 +349,7 @@ def extract_per_document(state: AggregateState) -> dict:
     question = state["question"]
     chunks_per_doc = state.get("chunks_per_doc", 4)
     query_type = state.get("query_type", "problems")
-    cfg = QUERY_TYPES.get(query_type, QUERY_TYPES["free"])
+    cfg = state.get("query_type_cfg") or QUERY_TYPES.get(query_type, QUERY_TYPES["free"])
 
     per_doc_findings: list[DocFindings] = []
     total_docs = len(state["documents"])
@@ -363,18 +445,37 @@ def extract_per_document(state: AggregateState) -> dict:
             logging.warning("[aggregate] LLM failed for: %s", filename, exc_info=True)
             continue
 
-        if "INGEN RELEVANTE FUNN" in raw.upper():
-            print(f"  ↳ No relevant findings", flush=True)
-            continue
+        structured = None
+        if cfg.get("structured"):
+            try:
+                structured = _parse_json_block(raw)
+            except Exception as e:
+                print(f"  ↳ JSON parse error: {e}", flush=True)
+                logging.warning("[aggregate] structured parse failed for %s", filename, exc_info=True)
+                continue
+            if not structured or structured.get("relevant") is False:
+                print(f"  ↳ Not relevant — skipping", flush=True)
+                continue
+            # Flat list (risks first, else kildefunn) for backward-compatible summaries.
+            findings = list(structured.get("risikoer") or []) or list(structured.get("kildefunn") or [])
+            has_content = any(
+                structured.get(k)
+                for k in ("kildefunn", "drivere", "sarbarheter", "konsekvenser", "risikoer")
+            )
+        else:
+            if "INGEN RELEVANTE FUNN" in raw.upper():
+                print(f"  ↳ No relevant findings", flush=True)
+                continue
 
-        findings = [
-            line.lstrip("-•* ").strip()
-            for line in raw.splitlines()
-            if line.strip() and line.strip()[0] in "-•*"
-        ]
-        if not findings:
-            print(f"  ↳ No bullet points found, using all lines as fallback", flush=True)
-            findings = [l.strip() for l in raw.splitlines() if l.strip()]
+            findings = [
+                line.lstrip("-•* ").strip()
+                for line in raw.splitlines()
+                if line.strip() and line.strip()[0] in "-•*"
+            ]
+            if not findings:
+                print(f"  ↳ No bullet points found, using all lines as fallback", flush=True)
+                findings = [l.strip() for l in raw.splitlines() if l.strip()]
+            has_content = bool(findings)
 
         n_findings = len(findings) if findings else 0
         print(f"  ↳ {n_findings} finding(s) extracted", flush=True)
@@ -387,7 +488,7 @@ def extract_per_document(state: AggregateState) -> dict:
             "n_findings": n_findings,
         })
 
-        if findings:
+        if has_content:
             ar = entry.get("publisert_arstall")
             try:
                 ar_int = int(ar) if ar not in (None, "") else None
@@ -400,9 +501,10 @@ def extract_per_document(state: AggregateState) -> dict:
                 publisert_av=(entry.get("publisert_av") or ""),
                 publisert_arstall=ar_int,
                 findings=findings,
+                structured=structured,
                 chunks=chunks,
             ))
-            logging.info("[aggregate] %d findings from: %s", len(findings), tittel)
+            logging.info("[aggregate] findings from: %s", tittel)
 
     logging.info("[aggregate] %d/%d docs had findings",
                  len(per_doc_findings), len(state["documents"]))
@@ -418,7 +520,9 @@ def aggregate_findings(state: AggregateState) -> dict:
     question = state["question"]
     query_type = state.get("query_type", "problems")
     n_personas = state.get("n_personas", 3)
-    cfg = QUERY_TYPES.get(query_type, QUERY_TYPES["free"])
+    cfg = state.get("query_type_cfg") or QUERY_TYPES.get(query_type, QUERY_TYPES["free"])
+    structured = bool(cfg.get("structured"))
+    include_aggregate = state.get("include_aggregate", True)
 
     cancel_event = state.get("cancel_event")
     if cancel_event is not None and cancel_event.is_set():
@@ -428,6 +532,18 @@ def aggregate_findings(state: AggregateState) -> dict:
             "documents_visited": len(state["documents"]),
             "documents_with_findings": len(per_doc),
             "cancelled": True,
+            cfg["output_key"]: [],
+        }}
+
+    # Cross-document syntese is optional — per-document analysis is always returned
+    # separately by the server. When not requested, skip the aggregation LLM call.
+    if not include_aggregate:
+        return {"result": {
+            "question": question,
+            "query_type": query_type,
+            "documents_visited": len(state["documents"]),
+            "documents_with_findings": len(per_doc),
+            "aggregated": False,
             cfg["output_key"]: [],
         }}
 
@@ -446,11 +562,23 @@ def aggregate_findings(state: AggregateState) -> dict:
             cfg["output_key"]: [],
         }}
 
+    _RISK_KEYS = (
+        ("kildefunn", "Kildefunn"), ("drivere", "Drivere"),
+        ("sarbarheter", "Sårbarheter"), ("konsekvenser", "Konsekvenser"),
+        ("risikoer", "Risikoer"),
+    )
+
     all_findings_text = ""
     for doc in per_doc:
         all_findings_text += f"\n\n### {doc.tittel}\n"
-        for f in doc.findings:
-            all_findings_text += f"- {f}\n"
+        if structured and doc.structured:
+            for key, lbl in _RISK_KEYS:
+                vals = doc.structured.get(key) or []
+                if vals:
+                    all_findings_text += f"{lbl}:\n" + "".join(f"- {v}\n" for v in vals)
+        else:
+            for f in doc.findings:
+                all_findings_text += f"- {f}\n"
 
     prompt = cfg["aggregate_prompt"].format(
         question=question,
@@ -460,6 +588,7 @@ def aggregate_findings(state: AggregateState) -> dict:
     )
 
     print(f"\n[aggregate] Calling aggregation LLM with {len(per_doc)} doc findings…", flush=True)
+    parsed: dict = {}
     try:
         response = llm.invoke([
             SystemMessage(content=cfg["aggregate_system"].format(n_personas=n_personas)),
@@ -467,13 +596,8 @@ def aggregate_findings(state: AggregateState) -> dict:
         ])
         raw = (response.content or "").strip()
         print(f"[aggregate] Aggregation LLM response ({len(raw)} chars): {raw[:200]!r}", flush=True)
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        raw = raw.strip()
-        parsed = json.loads(raw)
-        items = parsed.get("items", [])
+        parsed = _parse_json_block(raw)
+        items = parsed.get("temaer", []) if structured else parsed.get("items", [])
         print(f"[aggregate] Parsed {len(items)} items from aggregation", flush=True)
     except Exception as e:
         print(f"[aggregate] AGGREGATION ERROR: {e}", flush=True)
@@ -508,13 +632,20 @@ def aggregate_findings(state: AggregateState) -> dict:
         if "sources" in item:
             item["sources"] = _enrich_sources(item["sources"])
 
-    return {"result": {
+    result = {
         "question": question,
         "query_type": query_type,
         "documents_visited": len(state["documents"]),
         "documents_with_findings": len(per_doc),
+        "aggregated": True,
         cfg["output_key"]: items,
-    }}
+    }
+    if structured:
+        # Syntese-level fields that aren't per-tema (longlist context).
+        result["monstre"] = parsed.get("monstre", [])
+        result["usikkerhet_kunnskapshull"] = parsed.get("usikkerhet_kunnskapshull", [])
+        result["sporsmal_til_ledergruppen"] = parsed.get("sporsmal_til_ledergruppen", [])
+    return {"result": result}
 
 
 # ── Build graph ───────────────────────────────────────────────────────────────
