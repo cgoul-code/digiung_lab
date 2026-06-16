@@ -27,6 +27,7 @@ import threading
 import uuid
 from io import BytesIO
 from typing import Optional
+from urllib.parse import quote
 
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
@@ -151,6 +152,55 @@ app = cors(app, allow_origin="*")
 # name -> {"index": VectorStoreIndex, "doc_store_path": str}
 _indexes: dict[str, dict] = {}
 
+# ── Index load readiness ──────────────────────────────────────────────────────
+# Clients poll /health and must wait until state == "ready" before querying.
+# We never silently fall back to a different index when the requested one is
+# missing — that would answer from the wrong dataset.
+_NOT_READY_MSG = "Serveren laster fortsatt indekser. Prøv igjen om noen sekunder."
+_readiness: dict = {
+    "state":    "loading",   # "loading" | "ready" | "error"
+    "expected": [],           # index names we attempt to load (have on-disk data)
+    "loaded":   [],           # names successfully loaded into memory
+    "failed":   {},           # name -> error string
+    "message":  _NOT_READY_MSG,
+}
+
+
+def _set_ready_state() -> None:
+    """Recompute the overall readiness from expected/loaded/failed.
+
+    Ready means: every expected index loaded and at least one index is available.
+    """
+    expected = _readiness["expected"]
+    loaded   = list(_indexes)
+    _readiness["loaded"] = loaded
+    if not expected:
+        _readiness["state"] = "error"
+        _readiness["message"] = "Ingen indekser funnet å laste."
+    elif _readiness["failed"]:
+        _readiness["state"] = "error"
+        failed = ", ".join(sorted(_readiness["failed"]))
+        _readiness["message"] = f"Klarte ikke å laste indeks(er): {failed}"
+    elif all(n in _indexes for n in expected):
+        _readiness["state"] = "ready"
+        _readiness["message"] = ""
+    else:
+        _readiness["state"] = "loading"
+        _readiness["message"] = _NOT_READY_MSG
+
+
+def _not_ready_response():
+    """503 the browser can read — work endpoints reject until indexes are ready."""
+    return jsonify({
+        "error":    "server_not_ready",
+        "ready":    False,
+        "status":   _readiness["state"],
+        "message":  _readiness["message"],
+        "expected": _readiness["expected"],
+        "loaded":   _readiness["loaded"],
+        "failed":   _readiness["failed"],
+    }), 503
+
 
 def _read_doc_store_entries(doc_store_path: str, index_name: str) -> list[dict]:
     """Load entries for a given index from document_store.json.
@@ -175,14 +225,53 @@ _jobs: dict = {}
 
 
 def _resolve_index(name: Optional[str]):
-    """Return (index_name, entry) for the requested name, or the first loaded index as fallback."""
+    """Return (index_name, entry) for the requested name.
+
+    Strict: when a specific name is requested but not loaded, returns
+    (name, None) instead of silently substituting another index — the caller
+    turns that into an error. Only when no name is requested do we default to
+    the first loaded index.
+    """
     print(f"[_resolve_index] requested name: {name}, available indexes: {list(_indexes)}", flush=True)
-    if name and name in _indexes:
-        print(f"[_resolve_index] resolved to index: {name}", flush=True)
-        return name, _indexes[name]
+    if name:
+        if name in _indexes:
+            print(f"[_resolve_index] resolved to index: {name}", flush=True)
+            return name, _indexes[name]
+        print(f"[_resolve_index] requested index '{name}' not loaded — no fallback", flush=True)
+        return name, None
     first = next(iter(_indexes), None)
-    print(f"[_resolve_index] falling back to first index: {first}", flush=True)
+    print(f"[_resolve_index] no index requested → default to first: {first}", flush=True)
     return first, _indexes.get(first)
+
+
+def _index_or_error(requested: Optional[str]):
+    """Resolve an index while enforcing load readiness.
+
+    Returns (index_name, entry, error) where `error` is a ready-to-return
+    response tuple (or None). While indexes are still loading we 503 so the
+    client waits; once loading is done we never substitute a different index.
+    """
+    if _readiness["state"] == "loading":
+        return None, None, _not_ready_response()
+    index_name, entry = _resolve_index(requested)
+    if entry is None:
+        if requested:
+            return requested, None, (jsonify({
+                "error":   "index_not_loaded",
+                "ready":   False,
+                "status":  _readiness["state"],
+                "message": _readiness["message"] or f"Indeksen '{requested}' er ikke tilgjengelig.",
+                "loaded":  list(_indexes),
+                "failed":  _readiness["failed"],
+            }), 503)
+        return None, None, (jsonify({
+            "error":   "no_indexes_loaded",
+            "ready":   False,
+            "status":  _readiness["state"],
+            "message": _readiness["message"] or "Ingen indekser lastet inn.",
+            "loaded":  list(_indexes),
+        }), 503)
+    return index_name, entry, None
 
 
 async def _load_all_indexes_async():
@@ -204,6 +293,8 @@ async def _load_all_indexes_async():
 
     if not os.path.isdir(INDEX_STORAGE):
         print(f"[index] INDEX_STORAGE not found: {INDEX_STORAGE}", flush=True)
+        _readiness["expected"] = []
+        _set_ready_state()
         return
     print(f"[index] Loading indexes from {INDEX_STORAGE} ...", flush=True)
 
@@ -222,8 +313,13 @@ async def _load_all_indexes_async():
 
     print(f"[index] Indexes with on-disk data: {names}", flush=True)
 
+    # Record which indexes we expect to load so readiness can require them all.
+    _readiness["expected"] = list(names)
+    _readiness["failed"] = {}
+
     if not names:
         print(f"[index] No matching indexes found in {DOCUMENT_STORE_PATH} / {INDEX_STORAGE}", flush=True)
+        _set_ready_state()
         return
 
     loop = asyncio.get_event_loop()
@@ -242,16 +338,31 @@ async def _load_all_indexes_async():
         try:
             idx = await loop.run_in_executor(None, _load)
             _indexes[name] = {"index": idx, "doc_store_path": doc_store_path}
+            _readiness["failed"].pop(name, None)
         except Exception as e:
             print(f"[index] FAILED to load '{name}': {e}", flush=True)
+            _readiness["failed"][name] = str(e)
+        # Update readiness incrementally so /health reflects progress.
+        _set_ready_state()
 
-    print(f"[index] Loaded {len(_indexes)} index(es): {list(_indexes)}", flush=True)
+    _set_ready_state()
+    print(f"[index] Loaded {len(_indexes)} index(es): {list(_indexes)} — state={_readiness['state']}", flush=True)
+
+
+async def _load_all_indexes_guarded():
+    """Run the loader and ensure readiness never gets stuck on "loading"."""
+    try:
+        await _load_all_indexes_async()
+    except Exception as e:
+        logging.error("Index loading crashed: %s", e, exc_info=True)
+        _readiness["state"] = "error"
+        _readiness["message"] = f"Indekslasting feilet: {e}"
 
 
 @app.before_serving
 async def _spawn_loader_after_bind():
     loop = asyncio.get_event_loop()
-    loop.create_task(_load_all_indexes_async())
+    loop.create_task(_load_all_indexes_guarded())
     print("[server] Server is live. Indexes loading in background...", flush=True)
 
 
@@ -331,6 +442,53 @@ def _combine_and(*items) -> Optional[MetadataFilters]:
     return MetadataFilters(filters=non_null, condition=FilterCondition.AND)
 
 
+# ── Deep links into web sources ───────────────────────────────────────────────
+# Make citations point straight at the cited material:
+#   - web PDF (has a page number) → <url>#page=N  (browser PDF viewer)
+#   - web HTML page (no page)     → <url>#:~:text=…  (W3C Text Fragment;
+#       Chrome/Edge & Safari 16.1+ scroll to and highlight the passage,
+#       other browsers just open the page top)
+_SPA_FRAGMENT_MARKER = "/temabeskrivelse/"
+
+
+def _looks_like_web_url(s: Optional[str]) -> bool:
+    return isinstance(s, str) and s.strip().lower().startswith(("http://", "https://"))
+
+
+def _source_deep_link(base_url: Optional[str], excerpt: Optional[str], page=None) -> str:
+    """Build a deep link to the cited material on a web source.
+
+    Returns "" when not applicable (non-web URL, SPA topic page whose text is
+    rendered from JSON, or too little text to match reliably).
+    """
+    base = (base_url or "").strip()
+    if not _looks_like_web_url(base):
+        return ""
+
+    # A numeric page means this URL serves a PDF — link to the page directly.
+    # (PDF labels can be non-numeric like 'iv'; those fall through.)
+    try:
+        page_num = int(str(page).strip()) if page not in (None, "") else None
+    except (TypeError, ValueError):
+        page_num = None
+    if page_num is not None:
+        return f"{base.split('#', 1)[0]}#page={page_num}"
+
+    if _SPA_FRAGMENT_MARKER in base:
+        return ""
+    text = re.sub(r"\s+", " ", (excerpt or "")).strip()
+    if len(text) < 12:
+        return ""
+    words = text.split(" ")
+    # Short, distinctive start (+ end) so the match survives chunk truncation.
+    start = " ".join(words[:8])
+    end = " ".join(words[-6:]) if len(words) > 16 else ""
+    enc = lambda s: quote(s, safe="")
+    directive = "text=" + enc(start) + ("," + enc(end) if end else "")
+    # Append the fragment directive after any existing #fragment.
+    return f"{base}:~:{directive}" if "#" in base else f"{base}#:~:{directive}"
+
+
 # ── Document store endpoint ──────────────────────────────────────────────────
 
 def _unique_sorted(entries, field):
@@ -400,7 +558,17 @@ async def document_store_filter_options():
 
 @app.get("/health")
 async def health():
-    return jsonify({"status": "ok", "indexes_loaded": list(_indexes)})
+    """Readiness probe. Always 200 — the body's `ready` flag tells the client
+    whether all indexes finished loading. Work endpoints still 503 until ready."""
+    return jsonify({
+        "status":         _readiness["state"],
+        "ready":          _readiness["state"] == "ready",
+        "message":        _readiness["message"],
+        "expected":       _readiness["expected"],
+        "loaded":         _readiness["loaded"],
+        "failed":         _readiness["failed"],
+        "indexes_loaded": list(_indexes),  # back-compat
+    })
 
 
 @app.get("/indexes")
@@ -464,9 +632,9 @@ async def query():
     print(f"[/query] Received body: {body}", flush=True)
     body = body or {}
 
-    index_name, entry = _resolve_index(body.get("index_name"))
-    if not entry:
-        return jsonify({"error": "No indexes loaded yet"}), 503
+    index_name, entry, err = _index_or_error(body.get("index_name"))
+    if err:
+        return err
 
     question = body.get("question", "").strip()
     if not question:
@@ -544,6 +712,10 @@ async def query():
             "page_number":      meta.get("page_label") or meta.get("page"),
             "score":            round(float(getattr(nws, "score", 0.0)), 4),
             "excerpt":          text[:300],
+            # Deep link to the cited material on the web source (web sources only):
+            # PDF → #page=N, HTML → text fragment.
+            "deep_link":        _source_deep_link(
+                meta.get("url"), text, meta.get("page_label") or meta.get("page")),
         })
 
     return jsonify({
@@ -584,13 +756,13 @@ async def aggregate_stream():
     print(f"[/aggregate/stream] parsed body: {body}", flush=True)
     params = _parse_aggregate_body(body)
 
-    index_name, entry = _resolve_index(params.get("index_name"))
-    if not entry:
-        return jsonify({"error": "No indexes loaded yet"}), 503
+    index_name, entry, err = _index_or_error(params.get("index_name"))
+    if err:
+        return err
 
     print(f"[/aggregate/stream] index={index_name} filters={params.get('filters')}", flush=True)
-    if not params["question"]:
-        return jsonify({"error": "Missing 'question'"}), 400
+    # An empty question is allowed: the analysis is then driven by the query type's
+    # system prompt (see _resolve_question in aggregate_workflow).
 
     job_id = str(uuid.uuid4())
     cancel_event = threading.Event()
@@ -640,7 +812,17 @@ async def aggregate_stream():
                     "publisert_arstall": f.publisert_arstall,
                     "findings":          f.findings,
                     "structured":        f.structured,
-                    "chunks":            [{"page": c.page, "excerpt": c.excerpt} for c in f.chunks],
+                    "chunks":            [
+                        {
+                            "page":      c.page,
+                            "excerpt":   c.excerpt,
+                            # Web sources (filename is the page URL) get a deep link:
+                            # PDF → #page=N, HTML → text fragment.
+                            "deep_link": _source_deep_link(
+                                f.filename if _looks_like_web_url(f.filename) else "", c.excerpt, c.page),
+                        }
+                        for c in f.chunks
+                    ],
                 }
                 for f in (final.get("per_doc_findings") or [])
                 if f.findings or f.structured
@@ -789,11 +971,15 @@ def _add_chunk_references(doc, chunks):
     for chunk in chunks:
         page = chunk.get("page")
         excerpt = _xml_safe((chunk.get("excerpt") or "").strip())
+        deep = (chunk.get("deep_link") or "").strip()
         label = f"[Side {page}]  " if page is not None else ""
         p = doc.add_paragraph(style="List Bullet 2")
         if label:
             p.add_run(label).bold = True
         p.add_run(excerpt)
+        if deep:
+            p.add_run("  ")
+            _add_hyperlink(p, deep, "↗ åpne sitatet på nettsiden")
 
 
 def _render_risk_report(doc, result: dict, items: list, per_doc: list):
@@ -927,11 +1113,15 @@ def _generate_report_docx(result: dict) -> bytes:
                 for chunk in chunks:
                     page = chunk.get("page")
                     excerpt = _xml_safe((chunk.get("excerpt") or "").strip())
+                    deep = (chunk.get("deep_link") or "").strip()
                     label = f"[Side {page}]  " if page is not None else ""
                     p = doc.add_paragraph(style="List Bullet 2")
                     if label:
                         p.add_run(label).bold = True
                     p.add_run(excerpt)
+                    if deep:
+                        p.add_run("  ")
+                        _add_hyperlink(p, deep, "↗ åpne sitatet på nettsiden")
 
     buf = BytesIO()
     doc.save(buf)
@@ -1303,6 +1493,11 @@ def _run_reindex_job(job_id: str, name: str, loop: asyncio.AbstractEventLoop, mo
             local_store = os.path.join(persist_dir, "document_store.json")
             doc_store_path = local_store if os.path.isfile(local_store) else DOCUMENT_STORE_PATH
             _indexes[name] = {"index": idx, "doc_store_path": doc_store_path}
+            # Refresh readiness so a reindex can recover a previously-failed index.
+            if name not in _readiness["expected"]:
+                _readiness["expected"].append(name)
+            _readiness["failed"].pop(name, None)
+            _set_ready_state()
             _emit({"event": "reload", "message": f"In-memory index '{name}' reloaded"})
         except Exception as e:
             logging.error("Failed to reload index %s after reindex: %s", name, e, exc_info=True)

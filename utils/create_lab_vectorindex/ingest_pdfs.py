@@ -314,8 +314,40 @@ def _spa_topic_text(url: str) -> tuple[str, str]:
     return title, body
 
 
+def _pdf_url_as_documents(content: bytes, entry: dict, url: str) -> list[Document]:
+    """Extract text from a PDF fetched over HTTP, one Document per page.
+
+    Without this, a URL that serves a PDF would be parsed as HTML and the raw
+    PDF object structure (endobj, <</ArtBox…) would leak into the chunk text.
+    """
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+    try:
+        pages = PDFReader().load_data(file=tmp_path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+
+    enriched = dict(entry)
+    for page_doc in pages:
+        page_doc.doc_id = url
+        _apply_entry_metadata(page_doc, enriched, source=url, filename=url)
+        page_doc.metadata["url"] = url
+    if not pages:
+        raise ValueError(f"No text extracted from PDF at {url}")
+    return pages
+
+
 def _fetch_url_as_document(entry: dict) -> list[Document]:
-    """Fetch an HTML page and return a single cleaned-text Document."""
+    """Fetch a URL and return Document(s).
+
+    Routes by content type: PDFs are extracted page-by-page with PDFReader,
+    everything else is treated as HTML and cleaned to plain text.
+    """
     url = entry["url"]
 
     # SPA hash-fragment URLs (helsenorge "hvaerinnafor") need special handling
@@ -330,7 +362,22 @@ def _fetch_url_as_document(entry: dict) -> list[Document]:
         doc.metadata["url"] = url
         return [doc]
 
-    html = _http_get(url)
+    resp = requests.get(
+        url,
+        timeout=30,
+        headers={"User-Agent": "Mozilla/5.0 (digiung-lab-ingest)"},
+    )
+    resp.raise_for_status()
+
+    # A URL that serves a PDF (by header or magic bytes) must be parsed as a PDF,
+    # not as HTML — otherwise the raw PDF byte-stream becomes the chunk text.
+    content_type = (resp.headers.get("Content-Type") or "").lower()
+    if "application/pdf" in content_type or resp.content[:5] == b"%PDF-":
+        return _pdf_url_as_documents(resp.content, entry, url)
+
+    if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
+        resp.encoding = resp.apparent_encoding or "utf-8"
+    html = resp.text
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript", "nav", "footer", "header", "form", "aside"]):
         tag.decompose()

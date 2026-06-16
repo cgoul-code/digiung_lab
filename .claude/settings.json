@@ -3,7 +3,12 @@
     "allow": [
       "Bash(tasklist /FI \"IMAGENAME eq python.exe\")",
       "PowerShell(Get-Process python -ErrorAction SilentlyContinue)",
-      "PowerShell($bytes = [System.IO.File]::ReadAllBytes\\('.\\\\requirements.txt'\\); '{0:X2} {1:X2} {2:X2} {3:X2}' -f $bytes[0],$bytes[1],$bytes[2],$bytes[3])"
+      "PowerShell($bytes = [System.IO.File]::ReadAllBytes\\('.\\\\requirements.txt'\\); '{0:X2} {1:X2} {2:X2} {3:X2}' -f $bytes[0],$bytes[1],$bytes[2],$bytes[3])",
+      "Bash(./.venv/Scripts/python.exe -m py_compile query_server.py aggregate_workflow.py)",
+      "Bash(./.venv/Scripts/python.exe -c ' *)",
+      "Bash(./.venv/Scripts/python.exe -m py_compile query_server.py)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('scripts:', d.get\\('scripts'\\)\\); import os; print\\('node_modules exists:', os.path.isdir\\('node_modules'\\)\\)\")",
+      "Bash(./.venv/Scripts/python.exe -m py_compile utils/create_lab_vectorindex/ingest_pdfs.py)"
     ],
     "additionalDirectories": [
       "c:\\Users\\ChristianGoulignac\\vscode\\llama\\digiung_lab-query-client\\src"

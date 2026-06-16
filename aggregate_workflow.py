@@ -67,6 +67,7 @@ Funn fra {n_docs} rapporter:
 {all_findings}
 Aggreger og strukturer som beskrevet.""",
 
+        "default_question": "Hvilke problemer og utfordringer møter barn og unge?",
         "output_key": "problems",
     },
 
@@ -94,6 +95,7 @@ Kritiske øyeblikk fra {n_docs} rapporter:
 {all_findings}
 Aggreger og strukturer som beskrevet.""",
 
+        "default_question": "Hvilke kritiske øyeblikk og vendepunkter opplever unge?",
         "output_key": "moments",
     },
 
@@ -129,6 +131,7 @@ Mønstre fra {n_docs} rapporter:
 {all_findings}
 Lag {n_personas} personas basert på disse mønstrene.""",
 
+        "default_question": "Hvem er de unge, hva sliter de med og hva trenger de?",
         "output_key": "personas",
     },
 
@@ -155,6 +158,7 @@ Funn fra {n_docs} rapporter:
 {all_findings}
 Gi et strukturert svar på spørsmålet.""",
 
+        "default_question": "Gi en helhetlig oppsummering av de viktigste funnene i dokumentet.",
         "output_key": "findings",
     },
 
@@ -224,6 +228,7 @@ Analyser per dokument fra {n_docs} dokumenter:
 {all_findings}
 Lag en syntese på tvers (longlist) som beskrevet.""",
 
+        "default_question": "Hvilke strategiske drivere, sårbarheter, konsekvenser og risikoer fremgår av dokumentet?",
         "output_key": "risikoomrader",
     },
 }
@@ -308,6 +313,35 @@ def _parse_json_block(raw: str) -> dict:
     return json.loads(raw.strip())
 
 
+# Generic fallback when neither a user question nor a query-type default exists.
+_GENERIC_QUESTION = "Gi en helhetlig analyse av dokumentet."
+
+
+def _coerce_page(raw) -> Optional[int]:
+    """PDF page labels can be non-numeric (e.g. Roman numerals 'iv' for front
+    matter). Return the page as an int when numeric, otherwise None — so a
+    quirky label never crashes extraction."""
+    if raw is None:
+        return None
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_question(state: AggregateState, cfg: dict) -> str:
+    """The question used for retrieval and {question} substitution.
+
+    When the user leaves the question empty, the analysis is driven purely by the
+    system prompt: we fall back to the query type's `default_question` (then a
+    generic phrase) so per-document retrieval still surfaces relevant chunks.
+    """
+    q = (state.get("question") or "").strip()
+    if q:
+        return q
+    return (cfg.get("default_question") or "").strip() or _GENERIC_QUESTION
+
+
 def load_documents(state: AggregateState) -> dict:
     path       = state["document_store_path"]
     index_name = state.get("index_name", "")
@@ -346,10 +380,11 @@ def extract_per_document(state: AggregateState) -> dict:
     index: VectorStoreIndex = state["index"]
     llm = state.get("extract_llm") or state["llm"]
     print(f"[extract] Using LLM: {type(llm).__name__}", flush=True)
-    question = state["question"]
     chunks_per_doc = state.get("chunks_per_doc", 4)
     query_type = state.get("query_type", "problems")
     cfg = state.get("query_type_cfg") or QUERY_TYPES.get(query_type, QUERY_TYPES["free"])
+    # Empty question → drive the analysis from the system prompt alone.
+    question = _resolve_question(state, cfg)
 
     per_doc_findings: list[DocFindings] = []
     total_docs = len(state["documents"])
@@ -415,7 +450,7 @@ def extract_per_document(state: AggregateState) -> dict:
             text = (getattr(node, "text", "") or "").strip()
             raw_page = meta.get("page_label") or meta.get("page")
             chunks.append(ChunkRef(
-                page=int(raw_page) if raw_page is not None else None,
+                page=_coerce_page(raw_page),
                 excerpt=text[:600],
             ))
             context_parts.append(text[:800])
@@ -517,10 +552,11 @@ def extract_per_document(state: AggregateState) -> dict:
 def aggregate_findings(state: AggregateState) -> dict:
     llm = state.get("aggregate_llm") or state["llm"]
     per_doc = state["per_doc_findings"]
-    question = state["question"]
     query_type = state.get("query_type", "problems")
     n_personas = state.get("n_personas", 3)
     cfg = state.get("query_type_cfg") or QUERY_TYPES.get(query_type, QUERY_TYPES["free"])
+    # Empty question → drive the analysis from the system prompt alone.
+    question = _resolve_question(state, cfg)
     structured = bool(cfg.get("structured"))
     include_aggregate = state.get("include_aggregate", True)
 
