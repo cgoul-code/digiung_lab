@@ -37,6 +37,18 @@ from urllib.parse import urlsplit, urlunsplit
 # Cache for parent SPA pages keyed by URL without fragment
 _SPA_PAGE_CACHE: dict[str, str] = {}
 
+# Browser-like headers. Some sites (e.g. regjeringen.no behind a CDN/WAF) return
+# HTTP 403 to a bot-looking User-Agent — especially from datacenter IPs like
+# Azure — so we present as a normal browser.
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf,*/*;q=0.8",
+    "Accept-Language": "nb-NO,nb;q=0.9,no;q=0.8,en;q=0.7",
+}
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -139,7 +151,6 @@ def _check_url(url: str, timeout: int = 15) -> tuple[bool, str]:
     SPA topic URLs are validated by extracting the topic (raises if it's gone);
     plain URLs are checked with HEAD, falling back to GET for servers that reject HEAD.
     """
-    headers = {"User-Agent": "Mozilla/5.0 (digiung-lab-ingest)"}
     try:
         fragment = urlsplit(url).fragment
         if fragment and "/temabeskrivelse/" in fragment:
@@ -147,10 +158,10 @@ def _check_url(url: str, timeout: int = 15) -> tuple[bool, str]:
             _spa_topic_text(url)
             return True, "ok"
 
-        resp = requests.head(url, timeout=timeout, allow_redirects=True, headers=headers)
+        resp = requests.head(url, timeout=timeout, allow_redirects=True, headers=_BROWSER_HEADERS)
         if resp.status_code >= 400:
             # Many servers don't allow HEAD (403/405) — retry with a lightweight GET.
-            resp = requests.get(url, timeout=timeout, allow_redirects=True, headers=headers, stream=True)
+            resp = requests.get(url, timeout=timeout, allow_redirects=True, headers=_BROWSER_HEADERS, stream=True)
             resp.close()
         if resp.status_code >= 400:
             return False, f"HTTP {resp.status_code}"
@@ -162,8 +173,10 @@ def _check_url(url: str, timeout: int = 15) -> tuple[bool, str]:
 
 
 def _validate_urls(entries: list[dict], timeout: int = 15) -> None:
-    """Check that every url entry is reachable. Raises DocumentStoreValidationError
-    listing all bad links, so ingestion stops before doing any work."""
+    """Pre-check URL reachability. Non-fatal: logs a warning for unreachable
+    URLs but does NOT abort — a single blocked link (e.g. a CDN returning 403 to
+    Azure's IP) shouldn't stop the whole reindex. Each entry is still attempted
+    during ingestion and skipped individually on failure."""
     url_entries = [e for e in entries if e.get("url")]
     if not url_entries:
         return
@@ -176,21 +189,16 @@ def _validate_urls(entries: list[dict], timeout: int = 15) -> None:
         if ok:
             logging.info("  ✓ %s", url)
         else:
-            logging.error("  ✗ %s — %s", url, detail)
+            logging.warning("  ✗ %s — %s (will be retried during ingest, skipped if it still fails)", url, detail)
             bad.append((url, detail))
 
     if bad:
-        bullet_list = "\n".join(f"  ✗ {u} — {d}" for u, d in bad)
-        msg = (
-            f"{len(bad)} URL(s) in document_store.json are not reachable:\n"
-            f"{bullet_list}\n"
-            f"Fix or remove these URLs and rerun."
+        logging.warning(
+            "%d of %d URL(s) failed the pre-check and may be skipped during ingest.",
+            len(bad), len(url_entries),
         )
-        for line in msg.splitlines():
-            logging.error(line)
-        raise DocumentStoreValidationError(msg)
-
-    logging.info("All %d URL(s) reachable.", len(url_entries))
+    else:
+        logging.info("All %d URL(s) reachable.", len(url_entries))
 
 
 def _entry_key(entry: dict) -> str:
@@ -239,11 +247,7 @@ def _apply_entry_metadata(doc: Document, entry: dict, source: str, filename: str
 
 
 def _http_get(url: str) -> str:
-    resp = requests.get(
-        url,
-        timeout=30,
-        headers={"User-Agent": "Mozilla/5.0 (digiung-lab-ingest)"},
-    )
+    resp = requests.get(url, timeout=30, headers=_BROWSER_HEADERS)
     resp.raise_for_status()
     if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
         resp.encoding = resp.apparent_encoding or "utf-8"
@@ -362,11 +366,7 @@ def _fetch_url_as_document(entry: dict) -> list[Document]:
         doc.metadata["url"] = url
         return [doc]
 
-    resp = requests.get(
-        url,
-        timeout=30,
-        headers={"User-Agent": "Mozilla/5.0 (digiung-lab-ingest)"},
-    )
+    resp = requests.get(url, timeout=30, headers=_BROWSER_HEADERS)
     resp.raise_for_status()
 
     # A URL that serves a PDF (by header or magic bytes) must be parsed as a PDF,

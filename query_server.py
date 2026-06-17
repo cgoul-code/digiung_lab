@@ -476,15 +476,34 @@ def _source_deep_link(base_url: Optional[str], excerpt: Optional[str], page=None
 
     if _SPA_FRAGMENT_MARKER in base:
         return ""
-    text = re.sub(r"\s+", " ", (excerpt or "")).strip()
-    if len(text) < 12:
-        return ""
-    words = text.split(" ")
-    # Short, distinctive start (+ end) so the match survives chunk truncation.
-    start = " ".join(words[:8])
-    end = " ".join(words[-6:]) if len(words) > 16 else ""
+
+    # The chunk text carries newlines where the page has block boundaries
+    # (paragraphs, list items, headings). A Text Fragment anchor term cannot
+    # span a block boundary, so we anchor *within a single block*: pick the
+    # longest line (the most substantial paragraph) and build the anchors there.
+    blocks = [re.sub(r"\s+", " ", ln).strip() for ln in (excerpt or "").splitlines()]
+    blocks = [b for b in blocks if len(b) >= 20]
+    if not blocks:
+        whole = re.sub(r"\s+", " ", (excerpt or "")).strip()
+        if len(whole) < 12:
+            return ""
+        blocks = [whole]
+
+    target = max(blocks, key=len)
+    words = target.split(" ")
+    # Excerpts are often truncated mid-word — a partial trailing word would never
+    # match the live page and break the whole highlight, so drop it.
+    if len(words) > 3:
+        words = words[:-1]
+
     enc = lambda s: quote(s, safe="")
-    directive = "text=" + enc(start) + ("," + enc(end) if end else "")
+    if len(words) > 14:
+        # Range match (textStart,textEnd) within one block → highlights the
+        # whole paragraph between the two anchors.
+        directive = "text=" + enc(" ".join(words[:8])) + "," + enc(" ".join(words[-6:]))
+    else:
+        # Short paragraph: highlight it as one contiguous phrase.
+        directive = "text=" + enc(" ".join(words))
     # Append the fragment directive after any existing #fragment.
     return f"{base}:~:{directive}" if "#" in base else f"{base}#:~:{directive}"
 
