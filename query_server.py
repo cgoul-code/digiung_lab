@@ -508,6 +508,23 @@ def _source_deep_link(base_url: Optional[str], excerpt: Optional[str], page=None
     return f"{base}:~:{directive}" if "#" in base else f"{base}#:~:{directive}"
 
 
+def _citation_link(web_url, kilde_url, kilde_type, page, excerpt) -> str:
+    """Best deep link for a citation, pointing at the original source.
+
+    - URL-ingested web source       → page→#page else text fragment
+    - materialized PDF (kilde_type)  → kilde_url#page=N (PDF page maps 1:1)
+    - materialized HTML (kilde_type) → text fragment on the original page
+      (the stored PDF's page number doesn't map to the web page)
+    """
+    if web_url:
+        return _source_deep_link(web_url, excerpt, page)
+    if kilde_url and kilde_type == "pdf":
+        return _source_deep_link(kilde_url, excerpt, page)
+    if kilde_url and kilde_type == "html":
+        return _source_deep_link(kilde_url, excerpt, None)
+    return ""
+
+
 # ── Document store endpoint ──────────────────────────────────────────────────
 
 def _unique_sorted(entries, field):
@@ -731,10 +748,10 @@ async def query():
             "page_number":      meta.get("page_label") or meta.get("page"),
             "score":            round(float(getattr(nws, "score", 0.0)), 4),
             "excerpt":          text[:300],
-            # Deep link to the cited material on the web source (web sources only):
-            # PDF → #page=N, HTML → text fragment.
-            "deep_link":        _source_deep_link(
-                meta.get("url"), text, meta.get("page_label") or meta.get("page")),
+            # Deep link to the cited material in the original source.
+            "deep_link":        _citation_link(
+                meta.get("url"), meta.get("kilde_url"), meta.get("kilde_type"),
+                meta.get("page_label") or meta.get("page"), text),
         })
 
     return jsonify({
@@ -835,10 +852,10 @@ async def aggregate_stream():
                         {
                             "page":      c.page,
                             "excerpt":   c.excerpt,
-                            # Web sources (filename is the page URL) get a deep link:
-                            # PDF → #page=N, HTML → text fragment.
-                            "deep_link": _source_deep_link(
-                                f.filename if _looks_like_web_url(f.filename) else "", c.excerpt, c.page),
+                            # Deep link to the original source (URL entry or materialized file).
+                            "deep_link": _citation_link(
+                                f.filename if _looks_like_web_url(f.filename) else None,
+                                f.kilde_url, f.kilde_type, c.page, c.excerpt),
                         }
                         for c in f.chunks
                     ],
@@ -1498,15 +1515,39 @@ def _run_reindex_job(job_id: str, name: str, loop: asyncio.AbstractEventLoop, mo
                 logging.warning("Blob cleanup failed for %s: %s", name, e)
                 _emit({"event": "cleared_failed", "message": str(e)})
 
+        # Pull the latest document_store.json + data files from blob so freshly
+        # materialized entries and their PDFs are available without an app
+        # restart (no-op outside Azure).
+        if azure_blob.ENABLED:
+            try:
+                azure_blob.download_file("document_store.json", DOCUMENT_STORE_PATH)
+                pulled = azure_blob.download_prefix(f"data/{name}/", os.path.join(DATA_DIR, name))
+                if pulled:
+                    _emit({"event": "synced", "message": f"Pulled {pulled} data file(s) from blob"})
+            except Exception as e:
+                logging.warning("Blob pre-sync failed for %s: %s", name, e)
+                _emit({"event": "sync_failed", "message": str(e)})
+
         run_incremental_ingest(
             storage=INDEX_STORAGE,
             name=name,
             document_store_path=DOCUMENT_STORE_PATH,
             on_progress=_emit,
+            data_dir=DATA_DIR,
         )
+
+        # If nothing was ingested, no index exists on disk — report clearly
+        # instead of crashing the reload with a FileNotFoundError.
+        persist_dir = os.path.join(INDEX_STORAGE, name)
+        if not os.path.isfile(os.path.join(persist_dir, "docstore.json")):
+            _emit({"event": "error", "message": (
+                f"Ingen dokumenter ble indeksert for '{name}' — alle kilder feilet "
+                f"eller var tomme (se advarsler over). Indeksen ble ikke opprettet."
+            )})
+            return
+
         # Reload the in-memory index so /query sees new content immediately
         try:
-            persist_dir = os.path.join(INDEX_STORAGE, name)
             ctx = StorageContext.from_defaults(persist_dir=persist_dir)
             idx = load_index_from_storage(ctx)
             local_store = os.path.join(persist_dir, "document_store.json")

@@ -89,7 +89,8 @@ class DocumentStoreValidationError(Exception):
     """Raised when document_store.json is missing, malformed, or references missing files."""
 
 
-def _load_and_validate_document_store(json_path: str, index_name: str, check_urls: bool = True) -> list[dict]:
+def _load_and_validate_document_store(json_path: str, index_name: str, check_urls: bool = True,
+                                      data_dir: str = None) -> list[dict]:
     """
     Load document_store.json and verify every entry up front:
       - file entries  → the file must exist on disk
@@ -122,8 +123,7 @@ def _load_and_validate_document_store(json_path: str, index_name: str, check_url
         if entry.get("url"):
             continue
         filnavn = entry.get("filnavn", "")
-        # Normalise Windows backslashes to the OS separator
-        pdf_path = Path(filnavn.replace("\\", os.sep))
+        pdf_path = _resolve_source_path(filnavn, data_dir=data_dir, index_name=index_name)
         if not pdf_path.is_file():
             missing.append(str(pdf_path))
 
@@ -207,6 +207,31 @@ def _entry_key(entry: dict) -> str:
         return entry["url"]
     return str(Path(entry.get("filnavn", "").replace("\\", os.sep)))
 
+
+def _resolve_source_path(filnavn: str, data_dir: str = None, index_name: str = None) -> Path:
+    """Locate a source file robustly.
+
+    `filnavn` is stored relative (e.g. "data/<index>/<file>.pdf") and may not
+    resolve against the current working directory in every environment (the
+    blob bootstrap downloads data files under DATA_DIR). Try the literal path
+    first, then a few DATA_DIR-based locations.
+    """
+    raw = filnavn.replace("\\", os.sep)
+    candidates = [raw]
+    base = os.path.basename(raw)
+    if data_dir:
+        norm = raw.replace("\\", "/")
+        if norm.startswith("data/"):
+            # "data/<index>/<file>" → <data_dir>/<index>/<file>
+            candidates.append(os.path.join(data_dir, *norm.split("/")[1:]))
+        if index_name:
+            candidates.append(os.path.join(data_dir, index_name, base))
+        candidates.append(os.path.join(data_dir, base))
+    for c in candidates:
+        if c and Path(c).is_file():
+            return Path(c)
+    return Path(raw)  # fall back to literal; caller reports a clear "missing" error
+
 # ── Index helpers ─────────────────────────────────────────────────────────────
 
 def _upsert_docs_into_index(
@@ -244,6 +269,9 @@ def _apply_entry_metadata(doc: Document, entry: dict, source: str, filename: str
     doc.metadata["segment"]           = entry.get("segment") or ""
     doc.metadata["oppsummering"]      = entry.get("oppsummering") or ""
     doc.metadata["kilde_url"]         = entry.get("kilde_url") or ""
+    # For materialized sources: "pdf" (kilde_url is the real PDF → #page links)
+    # or "html" (kilde_url is a web page → text-fragment links). Empty otherwise.
+    doc.metadata["kilde_type"]        = entry.get("kilde_type") or ""
 
 
 def _http_get(url: str) -> str:
@@ -403,7 +431,7 @@ def _fetch_url_as_document(entry: dict) -> list[Document]:
     return [doc]
 
 
-def load_entry_as_documents(entry: dict) -> list[Document]:
+def load_entry_as_documents(entry: dict, data_dir: str = None, index_name: str = None) -> list[Document]:
     """
     Build Document(s) for a single document_store entry. Supports two formats:
       - File entry: {"filnavn": "...pdf", ...} → one Document per page
@@ -413,7 +441,7 @@ def load_entry_as_documents(entry: dict) -> list[Document]:
         return _fetch_url_as_document(entry)
 
     filnavn = entry.get("filnavn", "")
-    pdf_path = Path(filnavn.replace("\\", os.sep))
+    pdf_path = _resolve_source_path(filnavn, data_dir=data_dir, index_name=index_name)
 
     suffix = pdf_path.suffix.lower()
     if suffix in (".pptx", ".ppt"):
@@ -436,6 +464,7 @@ def run_incremental_ingest(
     document_store_path: str,
     on_progress=None,
     check_urls: bool = True,
+    data_dir: str = None,
 ):
     """Incrementally ingest entries. If on_progress is supplied it is called
     with dict events: {event, key, tittel, index, total, message?}."""
@@ -447,7 +476,8 @@ def run_incremental_ingest(
                 logging.warning("on_progress callback raised", exc_info=True)
 
     # Load + validate — fails here if any file is missing or any URL is unreachable
-    entries = _load_and_validate_document_store(document_store_path, name, check_urls=check_urls)
+    entries = _load_and_validate_document_store(document_store_path, name, check_urls=check_urls,
+                                                data_dir=data_dir)
 
     processed = _load_processed_doc_ids(storage, name)
     total = len(entries)
@@ -468,7 +498,7 @@ def run_incremental_ingest(
         logging.info("Ingesting: %s", tittel)
         _emit({"event": "doc_start", "index": idx, "total": total, "key": key, "tittel": tittel})
         try:
-            pages = load_entry_as_documents(entry)
+            pages = load_entry_as_documents(entry, data_dir=data_dir, index_name=name)
             logging.info("  → %d document(s) loaded", len(pages))
             _upsert_docs_into_index(name=name, storage=storage, documents=pages)
             processed.add(key)

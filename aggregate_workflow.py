@@ -244,6 +244,7 @@ class DocFindings(BaseModel):
     tittel:             str
     filename:           str
     kilde_url:          str            = ""
+    kilde_type:         str            = ""   # "pdf" | "html" for materialized sources
     publisert_av:       str            = ""
     publisert_arstall:  Optional[int]  = None
     findings:           list[str]      = Field(default_factory=list)
@@ -533,6 +534,7 @@ def extract_per_document(state: AggregateState) -> dict:
                 tittel=tittel,
                 filename=filename,
                 kilde_url=(entry.get("kilde_url") or ""),
+                kilde_type=(entry.get("kilde_type") or ""),
                 publisert_av=(entry.get("publisert_av") or ""),
                 publisert_arstall=ar_int,
                 findings=findings,
