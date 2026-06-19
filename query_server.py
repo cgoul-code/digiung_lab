@@ -1374,10 +1374,12 @@ async def admin_add_entry():
         return jsonify({"error": str(e)}), 400
 
     content_type = (request.content_type or "").lower()
+    replace_key = ""  # set for multipart uploads that replace an existing entry
 
     if content_type.startswith("multipart/"):
         files = await request.files
         form = await request.form
+        replace_key = (form.get("replace_key") or "").strip()
         uploaded = files.get("file")
         if not uploaded:
             return jsonify({"error": "Missing 'file' in multipart body"}), 400
@@ -1405,6 +1407,8 @@ async def admin_add_entry():
             "antall_deltakere": form.get("antall_deltakere") or None,
             "segment":          form.get("segment") or "",
             "oppsummering":     form.get("oppsummering") or "",
+            "kilde_url":        form.get("kilde_url") or "",
+            "kilde_type":       form.get("kilde_type") or "",
         }
     else:
         body = await request.get_json(force=True) or {}
@@ -1415,6 +1419,30 @@ async def admin_add_entry():
     with _doc_store_lock:
         data = _load_full_doc_store()
         entries = list(data.get(name, []))
+
+        # Replace an existing entry in place — e.g. swap a URL entry that the
+        # server can't fetch (regjeringen.no 403s the Azure IP) for an uploaded
+        # copy of the same document. Carry over metadata the form left blank and
+        # default kilde_url to the replaced URL so citations still link out.
+        if replace_key:
+            old_idx = next((i for i, e in enumerate(entries)
+                            if _entry_admin_key(e) == replace_key), None)
+            if old_idx is None:
+                return jsonify({"error": f"Entry to replace not found: '{replace_key}'"}), 404
+            old = entries[old_idx]
+            for k, v in old.items():
+                if k not in ("url", "filnavn") and not entry.get(k):
+                    entry[k] = v
+            old_url = old.get("url") or ""
+            if old_url and not entry.get("kilde_url"):
+                entry["kilde_url"] = old_url
+                if not entry.get("kilde_type") and old_url.lower().split("?")[0].endswith(".pdf"):
+                    entry["kilde_type"] = "pdf"
+            entries[old_idx] = entry
+            data[name] = entries
+            _save_full_doc_store(data)
+            return jsonify({"ok": True, "entry": entry, "replaced_key": replace_key})
+
         new_key = _entry_admin_key(entry)
         if new_key and any(_entry_admin_key(e) == new_key for e in entries):
             return jsonify({"error": f"Entry with key '{new_key}' already exists"}), 409
