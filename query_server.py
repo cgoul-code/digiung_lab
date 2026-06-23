@@ -33,7 +33,7 @@ from urllib.parse import quote
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
 
-from quart import Quart, request, jsonify
+from quart import Quart, request, jsonify, Response
 from quart_cors import cors
 
 from llama_index.core import (
@@ -1435,6 +1435,45 @@ async def admin_list_all_reports():
                 }
     reports = sorted(seen.values(), key=lambda r: (r["tittel"] or r["key"]).lower())
     return jsonify({"reports": reports})
+
+
+@app.get("/admin/fetch-url")
+async def admin_fetch_url():
+    """Download a PDF/PPTX from `url` server-side and stream the bytes back, so the
+    admin UI can turn a pasted document URL into a selectable file. The browser can't
+    fetch most external documents itself (no CORS header), but the server can. Sources
+    that 403 the server (e.g. some WAF-fronted sites) still fail — those need the manual
+    download path, which this endpoint surfaces as an error the UI can show."""
+    url = (request.args.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "url er påkrevd"}), 400
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        return jsonify({"error": "Bare http- og https-URL-er støttes"}), 400
+
+    import requests
+    from utils.create_lab_vectorindex.fetch_url_to_index import _BROWSER_HEADERS, _derive_filename
+
+    def _download():
+        r = requests.get(url, headers=_BROWSER_HEADERS, timeout=120)
+        r.raise_for_status()
+        return r.content, (r.headers.get("Content-Type") or "").lower()
+
+    loop = asyncio.get_event_loop()
+    try:
+        content, content_type = await loop.run_in_executor(None, _download)
+    except Exception as e:  # requests.RequestException + any URL/timeout error
+        return jsonify({"error": f"Nedlasting feilet: {e}"}), 502
+
+    fname = _derive_filename(url, content_type)
+    if not fname.lower().endswith((".pdf", ".pptx", ".ppt")):
+        return jsonify({
+            "error": (f"Ikke en PDF/PPTX (Content-Type: {content_type or 'ukjent'}). "
+                      "Denne funksjonen håndterer kun dokumentfiler, ikke HTML-sider.")
+        }), 415
+
+    resp = Response(content, content_type=content_type or "application/pdf")
+    resp.headers["Content-Disposition"] = f'attachment; filename="{fname}"'
+    return resp
 
 
 @app.get("/admin/index-query-types")

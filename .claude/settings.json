@@ -12,7 +12,9 @@
       "Bash(.venv/Scripts/python.exe -c ' *)",
       "Bash(.venv/Scripts/python.exe _chk_tmp.py)",
       "Bash(rm -f _chk_tmp.py)",
-      "Bash(npx eslint *)"
+      "Bash(npx eslint *)",
+      "Bash(python -c \"import requests; print\\('requests', requests.__version__\\)\")",
+      "Bash(python -c \"from utils.create_lab_vectorindex.fetch_url_to_index import _BROWSER_HEADERS, _derive_filename; print\\(_derive_filename\\('https://x.no/a/b/stm.pdf','application/pdf'\\)\\); print\\('ok'\\)\")"
     ],
     "additionalDirectories": [
       "c:\\Users\\ChristianGoulignac\\vscode\\llama\\digiung_lab-query-client\\src"

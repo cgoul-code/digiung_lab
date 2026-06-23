@@ -512,6 +512,19 @@
     {
       "url": "https://www.regjeringen.no/contentassets/f45e3838c32b4a3eab845a72051269cd/no/pdfs/prp202520260096000dddpdfs.pdf",
       "method": "GET"
+    },
+    {
+      "tittel": "",
+      "filnavn": "./data\\Test2_strategisk_risiko\\rettebrev.pdf",
+      "publisert_arstall": null,
+      "publisert_av": "",
+      "type_kilde": "",
+      "malgruppe": "",
+      "antall_deltakere": null,
+      "segment": "",
+      "oppsummering": "",
+      "kilde_url": "https://www.regjeringen.no/contentassets/f45e3838c32b4a3eab845a72051269cd/no/rett/rettebrev",
+      "kilde_type": ""
     }
   ]
 }
