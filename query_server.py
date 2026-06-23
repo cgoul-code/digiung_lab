@@ -1461,7 +1461,14 @@ async def admin_fetch_url():
     loop = asyncio.get_event_loop()
     try:
         content, content_type = await loop.run_in_executor(None, _download)
-    except Exception as e:  # requests.RequestException + any URL/timeout error
+    except requests.HTTPError as e:
+        # Upstream refused us (typically WAF 401/403/429). The browser can't fetch
+        # it either, so flag it so the UI can surface the manual download steps.
+        status = getattr(e.response, "status_code", 0) or 0
+        blocked = status in (401, 403, 429)
+        return jsonify({"error": f"Nedlasting feilet: {e}", "blocked": blocked,
+                        "upstream_status": status}), (403 if blocked else 502)
+    except Exception as e:  # connection/timeout/invalid URL etc.
         return jsonify({"error": f"Nedlasting feilet: {e}"}), 502
 
     fname = _derive_filename(url, content_type)
@@ -1474,6 +1481,181 @@ async def admin_fetch_url():
     resp = Response(content, content_type=content_type or "application/pdf")
     resp.headers["Content-Disposition"] = f'attachment; filename="{fname}"'
     return resp
+
+
+# ── LLM-assisted metadata extraction ──────────────────────────────────────────
+
+_DERIVE_META_SYSTEM = (
+    "Du er en bibliotekar som leser norske rapporter og presentasjoner og trekker ut "
+    "strukturerte metadata. Svar KUN med ett gyldig JSON-objekt — ingen forklaring, "
+    "ingen kodeblokk. Skriv på norsk. Sett et felt til null hvis det ikke kan utledes "
+    "trygt fra teksten (ikke gjett).\n\n"
+    "JSON-felter:\n"
+    "- tittel: dokumentets tittel.\n"
+    "- segment: kort tematisk segment/kategori (f.eks. \"Psykisk helse\", \"Kriminalitet\").\n"
+    "- publisert_av: utgiver, organisasjon eller forfatter som står bak.\n"
+    "- publisert_arstall: utgivelsesår som heltall (f.eks. 2024), ellers null.\n"
+    "- type_kilde: type kilde, f.eks. \"Forskningsrapport\", \"Brukerundersøkelse\", "
+    "\"Veileder\", \"Statistikk\", \"Nettartikkel\", \"Presentasjon\".\n"
+    "- malgruppe: målgruppen dokumentet handler om eller retter seg mot, hvis relevant, ellers null.\n"
+    "- antall_deltakere: KUN hvis dokumentet er en bruker-/spørreundersøkelse eller studie med "
+    "et oppgitt antall deltakere/respondenter — oppgi tallet (som tekst). Ellers null.\n"
+    "- oppsummering: en kort, dekkende oppsummering på 3-6 setninger."
+)
+
+_DERIVE_META_KEYS = (
+    "tittel", "segment", "publisert_av", "publisert_arstall",
+    "type_kilde", "malgruppe", "antall_deltakere", "oppsummering",
+)
+
+
+def _derive_metadata_from_file(tmp_path: str, fname: str, max_chars: int = 20000) -> dict:
+    """Extract text from a PDF/PPTX on disk and ask the LLM for structured metadata.
+    Returns a dict limited to the known metadata keys."""
+    from pathlib import Path
+    from langchain_core.messages import SystemMessage, HumanMessage
+    from llama_index.readers.file import PDFReader, PptxReader
+    from aggregate_workflow import _parse_json_block
+
+    suffix = os.path.splitext(fname)[1].lower()
+    reader = PptxReader() if suffix in (".pptx", ".ppt") else PDFReader()
+    pages = reader.load_data(file=Path(tmp_path))
+    text = "\n\n".join((getattr(p, "text", "") or "") for p in pages).strip()
+    if not text:
+        raise ValueError("Fant ingen tekst i dokumentet (kan være skannet/bilde-PDF).")
+    text = text[:max_chars]
+
+    prompt = (
+        f"Filnavn: {fname}\n\n"
+        f"Dokumenttekst (kan være avkortet):\n\"\"\"\n{text}\n\"\"\"\n\n"
+        "Returner JSON-objektet med metadata."
+    )
+    response = _extract_llm.invoke([
+        SystemMessage(content=_DERIVE_META_SYSTEM),
+        HumanMessage(content=prompt),
+    ])
+    parsed = _parse_json_block(response.content or "")
+
+    out = {}
+    for k in _DERIVE_META_KEYS:
+        v = parsed.get(k)
+        if v is None:
+            continue
+        if k == "publisert_arstall":
+            try:
+                out[k] = int(str(v).strip())
+            except (TypeError, ValueError):
+                pass
+        else:
+            s = str(v).strip()
+            if s:
+                out[k] = s
+    return out
+
+
+def _derive_metadata_from_entry(entry: dict, index_name: str, max_chars: int = 20000) -> dict:
+    """Derive metadata for an already-stored entry (file or URL) by loading it
+    through the same reader path used during ingestion."""
+    from langchain_core.messages import SystemMessage, HumanMessage
+    from aggregate_workflow import _parse_json_block
+    from utils.create_lab_vectorindex.ingest_pdfs import load_entry_as_documents
+
+    pages = load_entry_as_documents(entry, data_dir=DATA_DIR, index_name=index_name)
+    text = "\n\n".join((getattr(p, "text", "") or "") for p in pages).strip()
+    if not text:
+        raise ValueError("Fant ingen tekst i dokumentet (kan være skannet/bilde-PDF).")
+    text = text[:max_chars]
+
+    fname = os.path.basename((entry.get("filnavn") or entry.get("url") or "").replace("\\", "/"))
+    prompt = (
+        f"Filnavn: {fname}\n\n"
+        f"Dokumenttekst (kan være avkortet):\n\"\"\"\n{text}\n\"\"\"\n\n"
+        "Returner JSON-objektet med metadata."
+    )
+    response = _extract_llm.invoke([
+        SystemMessage(content=_DERIVE_META_SYSTEM),
+        HumanMessage(content=prompt),
+    ])
+    parsed = _parse_json_block(response.content or "")
+
+    out = {}
+    for k in _DERIVE_META_KEYS:
+        v = parsed.get(k)
+        if v is None:
+            continue
+        if k == "publisert_arstall":
+            try:
+                out[k] = int(str(v).strip())
+            except (TypeError, ValueError):
+                pass
+        else:
+            s = str(v).strip()
+            if s:
+                out[k] = s
+    return out
+
+
+@app.post("/admin/derive-metadata")
+async def admin_derive_metadata():
+    """Use the LLM to derive metadata the admin form can pre-fill (tittel, segment,
+    publisert_av, årstall, type_kilde, målgruppe, antall_deltakere, oppsummering).
+
+    Two input modes:
+      - multipart with 'file'   → derive from the uploaded document
+      - JSON {index_name, key}  → derive from an already-stored entry
+    Returns {ok, metadata:{...}}."""
+    content_type = (request.content_type or "").lower()
+    loop = asyncio.get_event_loop()
+
+    # Mode B: derive from a stored entry referenced by key (used when editing).
+    if not content_type.startswith("multipart/"):
+        body = await request.get_json(silent=True) or {}
+        index_name = (body.get("index_name") or "").strip()
+        key = (body.get("key") or "").strip()
+        if not index_name or not key:
+            return jsonify({"error": "Forventet 'file' (multipart) eller {index_name, key} (JSON)"}), 400
+        with _doc_store_lock:
+            data = _load_full_doc_store()
+            entries = list(data.get(index_name, []))
+        entry = next((e for e in entries if _entry_admin_key(e) == key), None)
+        if entry is None:
+            return jsonify({"error": f"Fant ingen oppføring med nøkkel '{key}'"}), 404
+        try:
+            meta = await loop.run_in_executor(None, _derive_metadata_from_entry, entry, index_name)
+        except Exception as e:
+            logging.warning("derive-metadata (entry) failed for %s: %s", key, e, exc_info=True)
+            return jsonify({"error": f"Kunne ikke avlede metadata: {e}"}), 502
+        return jsonify({"ok": True, "metadata": meta})
+
+    # Mode A: derive from an uploaded file (used when adding a new report).
+    files = await request.files
+    uploaded = files.get("file")
+    if not uploaded:
+        return jsonify({"error": "Mangler 'file' i forespørselen"}), 400
+    try:
+        fname = _safe_filename(uploaded.filename or "")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not fname.lower().endswith((".pdf", ".pptx", ".ppt")):
+        return jsonify({"error": "Bare PDF/PPTX støttes for metadata-avledning"}), 415
+
+    import tempfile
+    suffix = os.path.splitext(fname)[1].lower()
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    try:
+        await uploaded.save(tmp_path)
+        meta = await loop.run_in_executor(None, _derive_metadata_from_file, tmp_path, fname)
+    except Exception as e:
+        logging.warning("derive-metadata failed for %s: %s", fname, e, exc_info=True)
+        return jsonify({"error": f"Kunne ikke avlede metadata: {e}"}), 502
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+    return jsonify({"ok": True, "metadata": meta})
 
 
 @app.get("/admin/index-query-types")
@@ -1593,11 +1775,16 @@ async def admin_add_entry():
 
     content_type = (request.content_type or "").lower()
     replace_key = ""  # set for multipart uploads that replace an existing entry
+    overwrite = False  # set to replace an entry whose key already exists
+
+    def _truthy(v):
+        return str(v or "").strip().lower() in ("1", "true", "yes", "on")
 
     if content_type.startswith("multipart/"):
         files = await request.files
         form = await request.form
         replace_key = (form.get("replace_key") or "").strip()
+        overwrite = _truthy(form.get("overwrite"))
         uploaded = files.get("file")
         if not uploaded:
             return jsonify({"error": "Missing 'file' in multipart body"}), 400
@@ -1630,6 +1817,7 @@ async def admin_add_entry():
         }
     else:
         body = await request.get_json(force=True) or {}
+        overwrite = _truthy(body.pop("overwrite", False))
         if not body.get("url") and not body.get("filnavn"):
             return jsonify({"error": "Entry must include 'url' or 'filnavn'"}), 400
         entry = body
@@ -1662,8 +1850,27 @@ async def admin_add_entry():
             return jsonify({"ok": True, "entry": entry, "replaced_key": replace_key})
 
         new_key = _entry_admin_key(entry)
-        if new_key and any(_entry_admin_key(e) == new_key for e in entries):
-            return jsonify({"error": f"Entry with key '{new_key}' already exists"}), 409
+        dup_idx = next((i for i, e in enumerate(entries)
+                        if new_key and _entry_admin_key(e) == new_key), None)
+        if dup_idx is not None:
+            if not overwrite:
+                return jsonify({
+                    "error": f"Entry with key '{new_key}' already exists",
+                    "code": "duplicate",
+                    "conflict_key": new_key,
+                }), 409
+            # Overwrite: replace the existing entry in place, carrying over any
+            # metadata the new submission left blank so a quick re-upload doesn't
+            # wipe previously-entered fields. The file on disk was already
+            # overwritten by the save above, so this also re-syncs disk↔metadata.
+            old = entries[dup_idx]
+            for k, v in old.items():
+                if k not in ("url", "filnavn") and not entry.get(k):
+                    entry[k] = v
+            entries[dup_idx] = entry
+            data[name] = entries
+            _save_full_doc_store(data)
+            return jsonify({"ok": True, "entry": entry, "replaced_key": new_key})
         entries.append(entry)
         data[name] = entries
         _save_full_doc_store(data)
