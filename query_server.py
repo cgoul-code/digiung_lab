@@ -18,6 +18,7 @@ Endpoints:
 """
 
 import asyncio
+import base64
 import datetime
 import json
 import logging
@@ -86,6 +87,11 @@ DOCUMENT_STORE_PATH = _doc_store_env or "./utils/create_lab_vectorindex/document
 PROMPTS_STORE_PATH = os.getenv("PROMPTS_STORE_PATH") or "./utils/create_lab_vectorindex/query_type_prompts.json"
 PROMPTS_BLOB_NAME = "query_type_prompts.json"
 EDITABLE_PROMPT_FIELDS = ("extract_system", "extract_prompt", "aggregate_system", "aggregate_prompt")
+
+# Per-index list of enabled analysetyper (query types). Maps {index_name: [keys]}.
+# An index without an entry falls back to the client's built-in defaults.
+INDEX_QT_STORE_PATH = os.getenv("INDEX_QT_STORE_PATH") or "./utils/create_lab_vectorindex/index_query_types.json"
+INDEX_QT_BLOB_NAME = "index_query_types.json"
 
 print(f"[config] LOCAL={_LOCAL}", flush=True)
 print(f"[config] INDEX_STORAGE={INDEX_STORAGE}", flush=True)
@@ -289,6 +295,10 @@ async def _load_all_indexes_async():
         # Pull persisted prompt overrides too (best-effort; absent on first run).
         await loop.run_in_executor(
             None, azure_blob.download_file, PROMPTS_BLOB_NAME, PROMPTS_STORE_PATH,
+        )
+        # Pull persisted per-index analysetype selections (best-effort).
+        await loop.run_in_executor(
+            None, azure_blob.download_file, INDEX_QT_BLOB_NAME, INDEX_QT_STORE_PATH,
         )
 
     if not os.path.isdir(INDEX_STORAGE):
@@ -620,6 +630,83 @@ async def list_indexes():
         return jsonify(await loop.run_in_executor(None, _load))
     except Exception:
         return jsonify([])
+
+
+# ── Per-user conversation history ─────────────────────────────────────────────
+# Identity comes from App Service Authentication ("Easy Auth"): the signed-in
+# Entra ID user's UPN is injected as the X-MS-CLIENT-PRINCIPAL-NAME header.
+# Stored as one JSON file per user on the (durable) index file share so the
+# conversation log follows the user across devices/browsers. When auth is off
+# (or local dev) there's no identity → the client keeps its per-browser log.
+USER_HISTORY_DIR = os.path.join(INDEX_STORAGE, "_user_history")
+HISTORY_MAX_SERVER = 50
+
+
+def _current_user() -> Optional[str]:
+    """Return the signed-in user's identifier, or None when unauthenticated."""
+    name = (request.headers.get("X-MS-CLIENT-PRINCIPAL-NAME") or "").strip()
+    if not name:
+        raw = request.headers.get("X-MS-CLIENT-PRINCIPAL")
+        if raw:
+            try:
+                claims = json.loads(base64.b64decode(raw)).get("claims", [])
+                for c in claims:
+                    if c.get("typ") in ("preferred_username", "emails",
+                                        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress"):
+                        name = (c.get("val") or "").strip()
+                        if name:
+                            break
+            except Exception:
+                name = ""
+    return name or None
+
+
+def _user_history_path(user: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.@-]", "_", user) or "_anonymous"
+    return os.path.join(USER_HISTORY_DIR, f"{safe}.json")
+
+
+@app.get("/me")
+async def whoami():
+    return jsonify({"user": _current_user()})
+
+
+@app.get("/history")
+async def get_history():
+    user = _current_user()
+    if not user:
+        return jsonify({"history": [], "user": None})
+    path = _user_history_path(user)
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return jsonify({"history": data, "user": user})
+        except Exception:
+            logging.warning("Could not read history for %s", user, exc_info=True)
+    return jsonify({"history": [], "user": user})
+
+
+@app.put("/history")
+async def put_history():
+    user = _current_user()
+    if not user:
+        # No identity → nothing to persist server-side; client keeps it locally.
+        return jsonify({"ok": False, "user": None, "stored": False})
+    body = await request.get_json(force=True, silent=True)
+    items = body.get("history") if isinstance(body, dict) else body
+    if not isinstance(items, list):
+        return jsonify({"error": "Expected a JSON list or {history: [...]}"}), 400
+    items = items[:HISTORY_MAX_SERVER]
+    try:
+        os.makedirs(USER_HISTORY_DIR, exist_ok=True)
+        with open(_user_history_path(user), "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False)
+    except Exception as e:
+        logging.error("Could not write history for %s: %s", user, e, exc_info=True)
+        return jsonify({"error": "Could not persist history"}), 500
+    return jsonify({"ok": True, "user": user, "stored": True, "count": len(items)})
 
 
 @app.get("/query-types")
@@ -1266,6 +1353,40 @@ def _save_prompt_overrides(data: dict) -> None:
     azure_blob.upload_file(PROMPTS_STORE_PATH, PROMPTS_BLOB_NAME)
 
 
+# ── Per-index analysetyper (which query types an index exposes) ───────────────
+_index_qt_lock = threading.Lock()
+
+
+def _load_index_query_types() -> dict:
+    if not os.path.isfile(INDEX_QT_STORE_PATH):
+        return {}
+    try:
+        with open(INDEX_QT_STORE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as e:
+        logging.warning("Could not read index query types at %s: %s", INDEX_QT_STORE_PATH, e)
+        return {}
+
+
+def _save_index_query_types(data: dict) -> None:
+    os.makedirs(os.path.dirname(INDEX_QT_STORE_PATH), exist_ok=True)
+    tmp = INDEX_QT_STORE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, INDEX_QT_STORE_PATH)
+    # Mirror to blob (no-op outside Azure)
+    azure_blob.upload_file(INDEX_QT_STORE_PATH, INDEX_QT_BLOB_NAME)
+
+
+def _clean_query_type_keys(keys) -> list:
+    """Keep only known query-type keys, de-duplicated and in catalogue order."""
+    if not isinstance(keys, list):
+        return []
+    wanted = {k for k in keys if isinstance(k, str)}
+    return [qt for qt in QUERY_TYPES if qt in wanted]
+
+
 def _effective_query_types() -> dict:
     """Built-in QUERY_TYPES with persisted overrides applied to the editable fields."""
     overrides = _load_prompt_overrides()
@@ -1286,30 +1407,88 @@ def _effective_cfg(query_type: str) -> dict:
     return eff.get(query_type) or eff.get("free")
 
 
+@app.get("/admin/reports")
+async def admin_list_all_reports():
+    """List every unique report across all indexes, so a new index can be seeded
+    from existing ones. Deduped by url or filename; records which indexes use it."""
+    with _doc_store_lock:
+        data = _load_full_doc_store()
+    if not isinstance(data, dict):
+        return jsonify({"reports": []})
+    seen: dict = {}
+    for idx, entries in data.items():
+        for e in entries or []:
+            if not isinstance(e, dict):
+                continue
+            key = e.get("url") or os.path.basename((e.get("filnavn") or "").replace("\\", "/"))
+            if not key:
+                continue
+            if key in seen:
+                seen[key]["indexes"].append(idx)
+            else:
+                seen[key] = {
+                    "key":     key,
+                    "tittel":  e.get("tittel") or "",
+                    "kind":    "url" if e.get("url") else "file",
+                    "entry":   e,
+                    "indexes": [idx],
+                }
+    reports = sorted(seen.values(), key=lambda r: (r["tittel"] or r["key"]).lower())
+    return jsonify({"reports": reports})
+
+
+@app.get("/admin/index-query-types")
+async def admin_index_query_types():
+    """Return the per-index list of enabled analysetyper as {index_name: [keys]}.
+    Indexes without an entry use the client's built-in per-type defaults."""
+    with _index_qt_lock:
+        return jsonify(_load_index_query_types())
+
+
 @app.post("/admin/indexes")
 async def admin_create_index():
-    """Create a new (empty) index entry in document_store.json.
-    Body or query param `name` is required and must match _safe_index_name."""
+    """Create a new index in document_store.json. `name` is required (query or body).
+    Optional body `entries`: a list of existing report entries to seed the index with
+    (the same source files are shared on disk; the new index still needs a reindex).
+    Optional body `query_types`: a list of analysetype keys to expose for this index;
+    unknown keys are dropped, and an empty/absent list leaves the index on defaults."""
     name = request.args.get("name", "") or ""
+    body = await request.get_json(silent=True) or {}
     if not name:
-        try:
-            body = await request.get_json(silent=True) or {}
-            name = body.get("name", "")
-        except Exception:
-            name = ""
+        name = body.get("name", "")
+    seed = body.get("entries") if isinstance(body, dict) else None
+    qt_keys = _clean_query_type_keys(body.get("query_types") if isinstance(body, dict) else None)
     try:
         _safe_index_name(name)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
+    cleaned = []
+    if isinstance(seed, list):
+        seen = set()
+        for e in seed:
+            if not isinstance(e, dict):
+                continue
+            k = e.get("url") or e.get("filnavn")
+            if not k or k in seen:
+                continue
+            seen.add(k)
+            cleaned.append(e)
+
     with _doc_store_lock:
         data = _load_full_doc_store()
         if name in data:
             return jsonify({"error": f"Index '{name}' already exists"}), 409
-        data[name] = []
+        data[name] = cleaned
         _save_full_doc_store(data)
 
-    return jsonify({"ok": True, "name": name})
+    if qt_keys:
+        with _index_qt_lock:
+            qt_map = _load_index_query_types()
+            qt_map[name] = qt_keys
+            _save_index_query_types(qt_map)
+
+    return jsonify({"ok": True, "name": name, "count": len(cleaned), "query_types": qt_keys})
 
 
 @app.put("/admin/query-types/<qt>")

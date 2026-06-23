@@ -8,7 +8,11 @@
       "Bash(./.venv/Scripts/python.exe -c ' *)",
       "Bash(./.venv/Scripts/python.exe -m py_compile query_server.py)",
       "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('scripts:', d.get\\('scripts'\\)\\); import os; print\\('node_modules exists:', os.path.isdir\\('node_modules'\\)\\)\")",
-      "Bash(./.venv/Scripts/python.exe -m py_compile utils/create_lab_vectorindex/ingest_pdfs.py)"
+      "Bash(./.venv/Scripts/python.exe -m py_compile utils/create_lab_vectorindex/ingest_pdfs.py)",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe _chk_tmp.py)",
+      "Bash(rm -f _chk_tmp.py)",
+      "Bash(npx eslint *)"
     ],
     "additionalDirectories": [
       "c:\\Users\\ChristianGoulignac\\vscode\\llama\\digiung_lab-query-client\\src"

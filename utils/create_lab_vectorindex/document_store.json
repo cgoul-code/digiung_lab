@@ -409,7 +409,6 @@
       "kilde_url": "https://helsedir.sharepoint.com/teams/sp000300904/Lists/Innsikt%20%20kilder/Attachments/38/Digitalt%20foreldreskap%20rapport_klar_for_publisering_2026_05_02.pdf"
     }
   ],
-
   "Strategisk_risiko": [
     {
       "url": "https://www.regjeringen.no/contentassets/7400c9d08a5543b8912fbf700f3344fd/no/pdfs/stm202320240031000dddpdfs.pdf",
@@ -482,6 +481,37 @@
       "publisert_av": "Justis- og beredskapsdepartementet",
       "publisert_arstall": null,
       "kilde_url": "https://www.regjeringen.no/no/aktuelt/skal-gjore-norge-mer-motstandsdyktig-tre-kritiske-samfunnsomrader-prioriteres-i-den-forste-langtidsplanen-for-sivil-beredskap/id3144406/"
+    }
+  ],
+  "Test_strategi": [],
+  "Test2_strategisk_risiko": [
+    {
+      "antall_deltakere": null,
+      "filnavn": "data\\digiung_lab\\Barn_og_unges_erfaringer_med_rasisme_og_diskriminering.pdf",
+      "kilde_url": "https://helsedir.sharepoint.com/teams/sp000300904/Lists/Innsikt%20%20kilder/Attachments/16/Barn_og_unges_erfaringer_med_rasisme_og_diskriminering.pdf",
+      "malgruppe": "Barn og unge",
+      "oppsummering": "Mange barn og unge i Norge opplever rasisme og diskriminering, og 45 prosent rapporterer rasistiske ytringer det siste året. Rasisme forekommer særlig på skolen, sosiale medier, i gatemiljøer og i kollektivtransport. Ungdom med bakgrunn fra Afrika, Midtøsten og Asia er mest utsatt, og oppgir svært høye forekomster av rasisme. Samiske, jødiske og romske ungdommer beskriver også gjentatte negative opplevelser og mistanke i hverdagen.  De fleste som rammes, opplever det som nytteløst å varsle, og mange vet ikke hvor eller hvordan de kan si ifra. Barn og unge ønsker bedre varsling, mer opplæring i skolen, og større grad av støtte og dialog når rasisme skjer",
+      "publisert_arstall": 2023,
+      "publisert_av": "Proba samfunnsanalyse på oppdrag for Bufdir",
+      "segment": "Rasisme og diskrimiering",
+      "tittel": "Barn og unges erfaringer med rasisme og diskriminering",
+      "type_kilde": "Rapport"
+    },
+    {
+      "antall_deltakere": null,
+      "filnavn": "data\\digiung_lab\\Barn-unge-og-kriminalitet-20202-FHI.pdf",
+      "kilde_url": "https://helsedir.sharepoint.com/teams/sp000300904/Lists/Innsikt%20%20kilder/Attachments/3/Barn-unge-og-kriminalitet-20202-FHI.pdf",
+      "malgruppe": "Barn og unge",
+      "oppsummering": "Ungdomskriminaliteten har gått ned over tid, men seksuallovbrudd blant 15–20‑åringer har økt. Atferdsproblemer og lovbrudd henger ofte sammen med oppvekstbelastninger, svake skoleprestasjoner og negative jevnaldringsmiljøer. De mest virksomme tiltakene er familie- og nærmiljøbaserte modeller som PMTO, DUÅ, TIBIR, MST, FFT og TFCO, mens skoleprogrammer som PALS og Olweus forebygger bredt. God implementering og samarbeid mellom tjenester er avgjørende, og det trengs mer forskning på traumer, rusforebygging og tiltak for unge voksne.",
+      "publisert_arstall": 2020,
+      "publisert_av": "FHI",
+      "segment": "Kriminalitet",
+      "tittel": "Barn, unge og kriminalitet",
+      "type_kilde": "Rapport"
+    },
+    {
+      "url": "https://www.regjeringen.no/contentassets/f45e3838c32b4a3eab845a72051269cd/no/pdfs/prp202520260096000dddpdfs.pdf",
+      "method": "GET"
     }
   ]
 }
