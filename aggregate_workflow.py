@@ -231,6 +231,48 @@ Lag en syntese på tvers (longlist) som beskrevet.""",
         "default_question": "Hvilke strategiske drivere, sårbarheter, konsekvenser og risikoer fremgår av dokumentet?",
         "output_key": "risikoomrader",
     },
+
+    # WHO-kode compliance: regelverkssjekk mot WHO-koden (International Code of
+    # Marketing of Breast-milk Substitutes) + WHA-resolusjoner + Baby-Friendly /
+    # Mor-barn-vennlig-standarden. Non-structured: extract → kort, forankret
+    # punktliste per kilde; aggregate → ett tydelig compliance-svar (items).
+    "who_kode": {
+        "extract_system": """Du er en fagassistent som vurderer etterlevelse av WHO-koden (International Code of Marketing of Breast-milk Substitutes) med påfølgende WHA-resolusjoner, samt Baby-Friendly / Mor-barn-vennlig-standarden.
+Du analyserer ETT kildedokument om gangen og trekker ut KUN det som er relevant for spørsmålet.
+For hvert relevant punkt: gjengi hva dokumentet faktisk sier, og oppgi presis forankring (artikkel/avsnitt i Koden, resolusjonsnummer/-år, eller trinn i Baby-Friendly-standarden) når det fremgår av dokumentet.
+Ikke konkluder bastant på tvers av kilder her — det gjøres i syntesen. Ikke dikt opp bestemmelser som ikke står i dokumentet.
+Kildene kan være på engelsk; svar likevel på norsk.
+Svar KUN med en punktliste på norsk. Hvis dokumentet ikke er relevant for spørsmålet, svar: INGEN RELEVANTE FUNN.""",
+
+        "extract_prompt": """Spørsmål: {question}
+
+Dokumenttittel: {tittel}
+{context}
+
+Trekk ut bestemmelser, vilkår, definisjoner og henvisninger i dette dokumentet som er relevante for spørsmålet.""",
+
+        "aggregate_system": """Du er fagperson på WHO-koden, WHA-resolusjonene og Baby-Friendly-standarden. Du får utdrag fra flere kilder og skal gi ETT tydelig, etterprøvbart svar på spørsmålet.
+Bygg svaret KUN på utdragene; ikke legg til regler som ikke er forankret i dem. Hvis kildene er utilstrekkelige eller spriker, si det eksplisitt i konklusjonen («Uklart») og forklar hvorfor.
+Kildene kan være på engelsk; svar likevel på norsk.
+
+Svar KUN i dette JSON-formatet (ingen tekst utenfor JSON):
+{{"items": [
+  {{
+    "label": "Konklusjon: <Tillatt | Ikke tillatt | Omfattes | Omfattes ikke | Betinget | Uklart> — kort kjerne i svaret",
+    "description": "Begrunnelse i 1-3 setninger forankret i kildene. Ta med eventuelle vilkår eller unntak. Avslutt med 'Henvisning: <artikkel/avsnitt i Koden, resolusjon, eller Baby-Friendly-trinn>'.",
+    "sources": ["Tittel på kilden(e) som forankrer svaret"]
+  }}
+]}}
+Bruk normalt ETT item som direkte besvarer spørsmålet. Bruk flere kun når spørsmålet har klart adskilte deler.""",
+
+        "aggregate_prompt": """Spørsmål: {question}
+Relevante utdrag fra {n_docs} kilder:
+{all_findings}
+Gi ett tydelig compliance-svar på spørsmålet i JSON-formatet som beskrevet.""",
+
+        "default_question": "Er dette tillatt etter WHO-koden, og hva er i så fall vilkårene?",
+        "output_key": "findings",
+    },
 }
 
 

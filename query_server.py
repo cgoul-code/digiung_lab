@@ -1709,7 +1709,20 @@ async def admin_create_index():
             qt_map[name] = qt_keys
             _save_index_query_types(qt_map)
 
-    return jsonify({"ok": True, "name": name, "count": len(cleaned), "query_types": qt_keys})
+    # Seeded URL entries reference live URLs only — materialize them into
+    # data/<name>/ as real PDFs so the new index is self-contained (survives the
+    # source URL later going 403). Runs as a background job the client can poll.
+    materialize_job_id = None
+    if any(isinstance(e, dict) and e.get("url") for e in cleaned):
+        materialize_job_id = str(uuid.uuid4())
+        _reindex_jobs[materialize_job_id] = {
+            "status": "running", "events": [], "index_name": name, "mode": "materialize",
+        }
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, _run_materialize_job, materialize_job_id, name, loop)
+
+    return jsonify({"ok": True, "name": name, "count": len(cleaned),
+                    "query_types": qt_keys, "materialize_job_id": materialize_job_id})
 
 
 @app.put("/admin/query-types/<qt>")
@@ -1927,6 +1940,39 @@ async def admin_delete_entry():
         data[name] = remaining
         _save_full_doc_store(data)
     return jsonify({"ok": True, "removed_key": key})
+
+
+def _run_materialize_job(job_id: str, name: str, loop: asyncio.AbstractEventLoop):
+    """Download every URL entry of `name` into data/<name>/ as a real PDF and
+    rewrite it to a file entry, so the index no longer depends on the live URL.
+    Streams events into _reindex_jobs[job_id] (same shape as a reindex job)."""
+    job = _reindex_jobs[job_id]
+
+    def _emit(ev):
+        ev = dict(ev)
+        ev["ts"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        def _apply():
+            job["events"].append(ev)
+            if ev.get("event") == "done":
+                job["status"] = "done"
+            elif ev.get("event") == "error":
+                job["status"] = "error"
+        loop.call_soon_threadsafe(_apply)
+
+    try:
+        from utils.create_lab_vectorindex.materialize_sources import materialize_index
+        # materialize_index emits its own terminal "done" event via on_progress.
+        materialize_index(
+            document_store_path=DOCUMENT_STORE_PATH,
+            index_name=name,
+            data_dir=DATA_DIR,
+            dry_run=False,
+            push_blob=True,
+            on_progress=_emit,
+        )
+    except Exception as e:
+        logging.error("Materialize job %s failed: %s", job_id, e, exc_info=True)
+        _emit({"event": "error", "message": str(e)})
 
 
 def _run_reindex_job(job_id: str, name: str, loop: asyncio.AbstractEventLoop, mode: str = "incremental"):

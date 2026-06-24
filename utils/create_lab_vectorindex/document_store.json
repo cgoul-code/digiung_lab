@@ -514,17 +514,18 @@
       "method": "GET"
     },
     {
-      "tittel": "",
+      "tittel": "Korrigering av feil/unøyaktigheter i Meld. St. 2 (2025–2026), Prop. 95 LS (2025–2026) og Prop. 96 S (2025–2026) Revidert nasjonalbudsjett 2026 – Rettebrev",
       "filnavn": "./data\\Test2_strategisk_risiko\\rettebrev.pdf",
-      "publisert_arstall": null,
-      "publisert_av": "",
-      "type_kilde": "",
-      "malgruppe": "",
+      "publisert_arstall": 2026,
+      "publisert_av": "Statsråden",
+      "type_kilde": "Rettebrev",
+      "malgruppe": "Stortinget og andre lesere av budsjett- og proposisjonsdokumentene",
       "antall_deltakere": null,
-      "segment": "",
-      "oppsummering": "",
+      "segment": "Offentlig forvaltning og statsbudsjett",
+      "oppsummering": "Dokumentet er et rettebrev som korrigerer feil og unøyaktigheter i foreløpige utgaver av Meld. St. 2 (2025–2026), Prop. 95 LS (2025–2026) og Prop. 96 S (2025–2026) knyttet til Revidert nasjonalbudsjett 2026. Brevet presiserer rettelser i figurer, tabeller, lov- og vedtakstitler, formuleringer og enkelte paragraftekster, samt oppgir korrigerte tall for blant annet finanspolitiske indikatorer og kompensasjonsbehov for oljepionerer. Det inneholder også rettelser i omtalen av skattefradrag for pensjonsinntekt, vareførselsregler og budsjettposter i ulike departementers proposisjoner. Videre korrigeres tekst om resultatbasert finansiering i helseforetakene og feil i en utbyttetabell. Brevet er datert 29. mai 2026 og signert Jens Stoltenberg.",
       "kilde_url": "https://www.regjeringen.no/contentassets/f45e3838c32b4a3eab845a72051269cd/no/rett/rettebrev.pdf",
-      "kilde_type": ""
+      "kilde_type": "",
+      "url": null
     }
   ]
 }

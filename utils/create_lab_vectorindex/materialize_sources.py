@@ -167,12 +167,21 @@ def _fetch_as_pdf(url: str) -> tuple[bytes, str, str]:
 # ── main ───────────────────────────────────────────────────────────────────────
 
 def materialize_index(document_store_path: str, index_name: str, data_dir: str,
-                      dry_run: bool = False, push_blob: bool = True) -> dict:
+                      dry_run: bool = False, push_blob: bool = True, on_progress=None) -> dict:
     """Download/convert every URL entry for `index_name` into a PDF under
     <data_dir>/<index_name>/ and rewrite the entry to a file entry.
 
-    Returns a summary dict. Writes nothing when dry_run is True.
+    Returns a summary dict. Writes nothing when dry_run is True. If `on_progress`
+    is supplied it is called with dict events: {event, url?, tittel?, index?,
+    total?, message?, ...summary} so a caller (e.g. the server) can stream status.
     """
+    def _emit(ev):
+        if on_progress:
+            try:
+                on_progress(ev)
+            except Exception:
+                logging.warning("on_progress callback raised", exc_info=True)
+
     blob_on = bool(push_blob and azure_blob is not None and getattr(azure_blob, "ENABLED", False))
 
     # Work on the canonical store: pull the latest from blob first, so an index
@@ -193,12 +202,17 @@ def materialize_index(document_store_path: str, index_name: str, data_dir: str,
 
     summary = {"converted": 0, "skipped_file": 0, "failed": 0, "failures": []}
 
+    total_urls = sum(1 for e in entries if e.get("url"))
+    _emit({"event": "start", "total": total_urls})
+    url_seen = 0
+
     for i, entry in enumerate(entries):
         url = entry.get("url")
         if not url:
             summary["skipped_file"] += 1
             continue  # already a file entry
 
+        url_seen += 1
         tittel = entry.get("tittel") or url
         filename = _slug_for(url)
         rel_path = f"data/{index_name}/{filename}"
@@ -206,17 +220,22 @@ def materialize_index(document_store_path: str, index_name: str, data_dir: str,
 
         logging.info("[%d/%d] %s", i + 1, len(entries), tittel)
         logging.info("        %s", url)
+        _emit({"event": "entry_start", "index": url_seen, "total": total_urls, "url": url, "tittel": tittel})
         try:
             pdf_bytes, kilde_type, page_title = _fetch_as_pdf(url)
         except Exception as e:
             logging.warning("        ✗ FAILED: %s", e)
             summary["failed"] += 1
             summary["failures"].append({"url": url, "error": str(e)})
+            _emit({"event": "entry_failed", "index": url_seen, "total": total_urls,
+                   "url": url, "tittel": tittel, "message": str(e)})
             continue
 
         logging.info("        → %s  (%s, %d KB)", rel_path, kilde_type, len(pdf_bytes) // 1024)
         if dry_run:
             summary["converted"] += 1
+            _emit({"event": "entry_done", "index": url_seen, "total": total_urls,
+                   "url": url, "tittel": tittel, "filnavn": rel_path, "kilde_type": kilde_type, "dry_run": True})
             continue
 
         with open(abs_path, "wb") as fp:
@@ -233,6 +252,9 @@ def materialize_index(document_store_path: str, index_name: str, data_dir: str,
             new_entry["tittel"] = page_title
         entries[i] = new_entry
         summary["converted"] += 1
+        _emit({"event": "entry_done", "index": url_seen, "total": total_urls,
+               "url": url, "tittel": new_entry.get("tittel") or tittel,
+               "filnavn": rel_path, "kilde_type": kilde_type})
 
     if not dry_run and summary["converted"]:
         store[index_name] = entries
@@ -254,6 +276,7 @@ def materialize_index(document_store_path: str, index_name: str, data_dir: str,
         logging.warning("Failures:")
         for fl in summary["failures"]:
             logging.warning("  ✗ %s — %s", fl["url"], fl["error"])
+    _emit({"event": "done", **summary})
     return summary
 
 
