@@ -49,7 +49,8 @@ from llama_index.core.vector_stores import (
     FilterOperator,
     FilterCondition,
 )
-# Note: for multi-value OR within a field we nest MetadataFilters
+# Note: SimpleVectorStore does not support nested MetadataFilters, so the whole
+# filter tree must stay a flat list of MetadataFilter (multi-value → IN).
 from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
 from llama_index.llms.azure_openai import AzureOpenAI
 from langchain_openai import AzureChatOpenAI
@@ -380,10 +381,13 @@ async def _spawn_loader_after_bind():
 
 def _build_filters(filter_dict: dict) -> Optional[MetadataFilters]:
     """
-    Build LlamaIndex MetadataFilters.
-    - Single value per field  → EQ filter
-    - Multiple values (comma-joined) → OR group for that field
-    - Multiple fields → AND across fields
+    Build a flat LlamaIndex MetadataFilters.
+
+    SimpleVectorStore does not support nested MetadataFilters, so every field
+    becomes a single MetadataFilter:
+    - Single value per field         → EQ filter
+    - Multiple values (';'-joined)   → IN filter (field value is one of these)
+    - Multiple fields                → AND across fields
     """
     if not filter_dict:
         return None
@@ -402,20 +406,13 @@ def _build_filters(filter_dict: dict) -> Optional[MetadataFilters]:
                 MetadataFilter(key=key, value=values[0], operator=FilterOperator.EQ)
             )
         else:
-            # OR group within this field
+            # "value is one of these" — a flat IN filter, not a nested OR group.
             and_conditions.append(
-                MetadataFilters(
-                    filters=[MetadataFilter(key=key, value=v) for v in values],
-                    condition=FilterCondition.OR,
-                )
+                MetadataFilter(key=key, value=values, operator=FilterOperator.IN)
             )
 
     if not and_conditions:
         return None
-
-    if len(and_conditions) == 1:
-        c = and_conditions[0]
-        return c if isinstance(c, MetadataFilters) else MetadataFilters(filters=[c], condition=FilterCondition.AND)
 
     return MetadataFilters(filters=and_conditions, condition=FilterCondition.AND)
 
@@ -442,14 +439,20 @@ def _active_filenames(index_name: str) -> Optional[list[str]]:
 
 
 def _combine_and(*items) -> Optional[MetadataFilters]:
-    """AND-combine MetadataFilter / MetadataFilters / None items."""
-    non_null = [x for x in items if x is not None]
-    if not non_null:
+    """AND-combine MetadataFilter / MetadataFilters / None items into a single
+    *flat* MetadataFilters. SimpleVectorStore rejects nested MetadataFilters, so
+    any AND sub-group is spliced into one flat filter list rather than nested."""
+    flat: list[MetadataFilter] = []
+    for item in items:
+        if item is None:
+            continue
+        if isinstance(item, MetadataFilters) and item.condition == FilterCondition.AND:
+            flat.extend(item.filters)
+        else:
+            flat.append(item)
+    if not flat:
         return None
-    if len(non_null) == 1:
-        f = non_null[0]
-        return f if isinstance(f, MetadataFilters) else MetadataFilters(filters=[f], condition=FilterCondition.AND)
-    return MetadataFilters(filters=non_null, condition=FilterCondition.AND)
+    return MetadataFilters(filters=flat, condition=FilterCondition.AND)
 
 
 # ── Deep links into web sources ───────────────────────────────────────────────
