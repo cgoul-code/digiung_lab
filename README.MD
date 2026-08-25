@@ -8,6 +8,9 @@
 
 ## Azure deployment
 
+> Moving off Azure? See [docs/fly-migration.md](docs/fly-migration.md) for a
+> step-by-step migration to Fly.io (Azure OpenAI stays; only hosting moves).
+
 The server auto-detects Azure App Service via the `WEBSITE_SITE_NAME` env var.
 When in Azure, indexes, source files, and `document_store.json` are mirrored
 to the blob container set by `CONTAINER_NAME` (using `CONNECTION_STRING`).

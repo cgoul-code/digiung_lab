@@ -495,7 +495,8 @@
       "publisert_av": "Proba samfunnsanalyse på oppdrag for Bufdir",
       "segment": "Rasisme og diskrimiering",
       "tittel": "Barn og unges erfaringer med rasisme og diskriminering",
-      "type_kilde": "Rapport"
+      "type_kilde": "Rapport",
+      "url": null
     },
     {
       "antall_deltakere": null,
@@ -514,18 +515,69 @@
       "method": "GET"
     },
     {
-      "tittel": "Korrigering av feil/unøyaktigheter i Meld. St. 2 (2025–2026), Prop. 95 LS (2025–2026) og Prop. 96 S (2025–2026) Revidert nasjonalbudsjett 2026 – Rettebrev",
-      "filnavn": "./data\\Test2_strategisk_risiko\\rettebrev.pdf",
-      "publisert_arstall": 2026,
-      "publisert_av": "Statsråden",
-      "type_kilde": "Rettebrev",
-      "malgruppe": "Stortinget og andre lesere av budsjett- og proposisjonsdokumentene",
+      "tittel": "Regulating the digital marketing of breast-milk substitutes",
+      "filnavn": "./data\\Test2_strategisk_risiko\\B156_(30)-en.pdf",
+      "publisert_arstall": 2025,
+      "publisert_av": "Verdens helseorganisasjon (WHO) Executive Board",
+      "type_kilde": "Resolusjon",
+      "malgruppe": "Medlemsstater, sivilsamfunn, helsemyndigheter, gravide, foreldre og omsorgspersoner",
       "antall_deltakere": null,
-      "segment": "Offentlig forvaltning og statsbudsjett",
-      "oppsummering": "Dokumentet er et rettebrev som korrigerer feil og unøyaktigheter i foreløpige utgaver av Meld. St. 2 (2025–2026), Prop. 95 LS (2025–2026) og Prop. 96 S (2025–2026) knyttet til Revidert nasjonalbudsjett 2026. Brevet presiserer rettelser i figurer, tabeller, lov- og vedtakstitler, formuleringer og enkelte paragraftekster, samt oppgir korrigerte tall for blant annet finanspolitiske indikatorer og kompensasjonsbehov for oljepionerer. Det inneholder også rettelser i omtalen av skattefradrag for pensjonsinntekt, vareførselsregler og budsjettposter i ulike departementers proposisjoner. Videre korrigeres tekst om resultatbasert finansiering i helseforetakene og feil i en utbyttetabell. Brevet er datert 29. mai 2026 og signert Jens Stoltenberg.",
-      "kilde_url": "https://www.regjeringen.no/contentassets/f45e3838c32b4a3eab845a72051269cd/no/rett/rettebrev.pdf",
+      "segment": "Barn og ernæring",
+      "oppsummering": "Dokumentet er en beslutning fra WHOs Executive Board om å anbefale en resolusjon til Verdens helseforsamling om regulering av digital markedsføring av morsmelkerstatning. Teksten understreker at digital og influencer-basert markedsføring av morsmelkerstatning, tåteflasker, smokker og mat for sped- og småbarn kan undergrave amming og skade folkehelsen. Medlemsstatene oppfordres til å utvikle og styrke bindende regulering, overvåking og håndheving, samt sikre vern mot interessekonflikter. WHO-direktøren bes også om å gi teknisk støtte, samle erfaringer fra land og rapportere om gjennomføringen til Verdens helseforsamling i 2028.",
+      "kilde_url": "",
+      "kilde_type": ""
+    },
+    {
+      "tittel": "Clarification on the classification of follow-up formulas for children 6-36 months as breastmilk substitutes",
+      "filnavn": "./data\\Test2_strategisk_risiko\\WHO-NMH-NHD-18.11-eng.pdf",
+      "publisert_arstall": 2018,
+      "publisert_av": "World Health Organization",
+      "type_kilde": "Informasjonsnotat",
+      "malgruppe": "Spedbarn og småbarn 6–36 måneder, samt beslutningstakere og fagpersoner innen ernæring og folkehelse",
+      "antall_deltakere": null,
+      "segment": "Barn og ernæring",
+      "oppsummering": "Dette informasjonsnotatet fra WHO klargjør hvorfor oppfølgingsmelk og lignende produkter for barn 6–36 måneder skal regnes som morsmelkerstatninger etter den internasjonale koden for markedsføring av brystmelkerstatninger. Dokumentet viser til at fortsatt amming opp til to år eller lenger gir betydelige helsegevinster for både barn og mor, blant annet redusert dødelighet, bedre ernæring og lavere risiko for overvekt hos barn. WHO argumenterer for at slike produkter i praksis erstatter brystmelk, og derfor faller inn under kodens virkeområde uavhengig av produktenes sammensetning. Notatet konkluderer med at klassifiseringen er i tråd med WHOs anbefalinger og eksisterende politikk for å beskytte og fremme amming.",
+      "kilde_url": "",
+      "kilde_type": ""
+    },
+    {
+      "tittel": "The International Code of Marketing of Breast-milk Substitutes: Frequently Asked Questions (2017 Update)",
+      "filnavn": "./data\\Test2_strategisk_risiko\\WHO-NMH-NHD-17.1-eng.pdf",
+      "publisert_arstall": 2017,
+      "publisert_av": "World Health Organization",
+      "type_kilde": "Veileder",
+      "malgruppe": "Beslutningstakere, helsearbeidere, andre som arbeider med regelverket, samt allmennheten",
+      "antall_deltakere": null,
+      "segment": "Spedbarnsernæring",
+      "oppsummering": "Dokumentet er en spørsmål-og-svar-publikasjon om den internasjonale koden for markedsføring av morsmelkerstatninger. Det forklarer hva koden er, hvorfor den er viktig, hvilke produkter og markedsføringsformer den omfatter, og hvordan senere WHA-resolusjoner utdyper og utvider regelverket. Publikasjonen understreker betydningen av amming for barns og mødres helse, og beskriver hvordan aggressiv markedsføring av morsmelkerstatning kan undergrave amming. Den retter seg mot beslutningstakere, helsepersonell og andre som trenger lett tilgjengelig informasjon om implementering og tolkning av koden.",
+      "kilde_url": "",
+      "kilde_type": ""
+    },
+    {
+      "antall_deltakere": null,
+      "filnavn": "./data\\Test2_strategisk_risiko\\9241541601.pdf",
       "kilde_type": "",
-      "url": null
+      "kilde_url": "",
+      "malgruppe": "",
+      "oppsummering": "",
+      "publisert_arstall": null,
+      "publisert_av": "",
+      "segment": "",
+      "tittel": "9241541601",
+      "type_kilde": ""
+    },
+    {
+      "antall_deltakere": null,
+      "filnavn": "./data\\Test2_strategisk_risiko\\9789240074422-eng.pdf",
+      "kilde_type": "",
+      "kilde_url": "",
+      "malgruppe": "Helsepersonell, helseprofesjonelle foreninger, forskere og arrangører av faglige og vitenskapelige møter",
+      "oppsummering": "Dokumentet er et informasjonsnotat fra WHO som presiserer hva som regnes som sponsing av faglige og vitenskapelige møter fra selskaper som markedsfører mat og drikke for spedbarn og småbarn. Notatet bygger på WHO-veiledningen fra 2016 om å stanse upassende markedsføring av slike produkter, inkludert morsmelkerstatning og oppfølgingsmelk for barn opp til 36 måneder. Det forklarer at både økonomiske bidrag og naturalytelser, annonser, utstillingsplass, støtte til enkeltøkter, stipender og deling av deltakerlister kan utgjøre sponsing og skape interessekonflikter. WHO understreker at profesjonsforeninger og arrangører ikke bør be om eller akseptere slik sponsing, fordi den kan påvirke faglig uavhengighet, troverdighet og pasientbehandling.",
+      "publisert_arstall": 2023,
+      "publisert_av": "World Health Organization",
+      "segment": "Barn og ernæring",
+      "tittel": "Clarification on sponsorship of health professional and scientific meetings by companies that market foods for infants and young children",
+      "type_kilde": "Informasjonsnotat"
     }
   ]
 }

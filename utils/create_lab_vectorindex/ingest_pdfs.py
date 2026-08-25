@@ -28,7 +28,7 @@ from llama_index.core import (
 from llama_index.core.schema import Document
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
-from llama_index.readers.file import PDFReader, PptxReader
+from llama_index.readers.file import DocxReader, PDFReader, PptxReader
 
 import requests
 from bs4 import BeautifulSoup
@@ -201,6 +201,41 @@ def _validate_urls(entries: list[dict], timeout: int = 15) -> None:
         logging.info("All %d URL(s) reachable.", len(url_entries))
 
 
+def _prune_removed_docs(storage: str, name: str, stale_keys: set[str], data_dir: str = None) -> int:
+    """Delete nodes for manifest keys that are no longer in the document store.
+
+    Removing an entry from the list is not enough on its own — its text stays
+    searchable until the nodes go too. Deletion is deferred to here so the list
+    can be edited and undone freely; the build is what makes it real.
+    """
+    persist_dir = os.path.join(storage, name)
+    if not stale_keys or not os.path.isfile(os.path.join(persist_dir, "docstore.json")):
+        return 0
+
+    storage_context = StorageContext.from_defaults(persist_dir=persist_dir)
+    index = load_index_from_storage(storage_context)
+
+    for key in stale_keys:
+        # The manifest holds the raw filnavn; ingest tagged the nodes with the
+        # resolved path. They match locally but can differ once DATA_DIR is in
+        # play, so try both.
+        candidates = [key]
+        try:
+            resolved = str(_resolve_source_path(key, data_dir=data_dir, index_name=name))
+            if resolved != key:
+                candidates.append(resolved)
+        except Exception:
+            pass
+        for ref_id in candidates:
+            try:
+                index.delete_ref_doc(ref_id, delete_from_docstore=True)
+            except Exception as e:
+                logging.debug("No nodes for ref_doc_id %r (%s)", ref_id, e)
+
+    index.storage_context.persist(persist_dir=persist_dir)
+    return len(stale_keys)
+
+
 def _entry_key(entry: dict) -> str:
     """Stable identifier used for manifest tracking."""
     if entry.get("url"):
@@ -246,6 +281,14 @@ def _upsert_docs_into_index(
         logging.info("Loading existing index from %s", persist_dir)
         storage_context = StorageContext.from_defaults(persist_dir=persist_dir)
         index = load_index_from_storage(storage_context)
+        # Replace, don't append. Re-reading a document — edited metadata, or a
+        # new file uploaded under the same name — must not leave the previous
+        # version's nodes behind next to the new ones.
+        for ref_id in dict.fromkeys(d.doc_id for d in documents if getattr(d, "doc_id", None)):
+            try:
+                index.delete_ref_doc(ref_id, delete_from_docstore=True)
+            except Exception as e:
+                logging.debug("Nothing to replace for ref_doc_id %r (%s)", ref_id, e)
         for doc in documents:
             index.insert(doc)
     else:
@@ -446,6 +489,9 @@ def load_entry_as_documents(entry: dict, data_dir: str = None, index_name: str =
     suffix = pdf_path.suffix.lower()
     if suffix in (".pptx", ".ppt"):
         reader = PptxReader()
+    elif suffix == ".docx":
+        # Only the modern zip-based format; docx2txt cannot read legacy .doc.
+        reader = DocxReader()
     else:
         reader = PDFReader()
     pages: list[Document] = reader.load_data(file=pdf_path)
@@ -480,6 +526,18 @@ def run_incremental_ingest(
                                                 data_dir=data_dir)
 
     processed = _load_processed_doc_ids(storage, name)
+
+    # Reconcile first: anything the manifest still lists but the document store
+    # no longer contains was deleted from the list and must leave the index too.
+    stale = processed - {_entry_key(e) for e in entries}
+    if stale:
+        logging.info("Pruning %d document(s) removed from the list", len(stale))
+        pruned = _prune_removed_docs(storage, name, stale, data_dir=data_dir)
+        processed -= stale
+        _save_processed_doc_ids(storage, name, processed)
+        _emit({"event": "pruned", "count": pruned,
+               "message": f"Fjernet {pruned} slettet dokument(er) fra dokumentbanken"})
+
     total = len(entries)
     logging.info("Found %d entries in document store, %d already ingested", total, len(processed))
     _emit({"event": "start", "total": total, "already_ingested": len(processed)})

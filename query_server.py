@@ -1328,6 +1328,33 @@ def _entry_admin_key(entry: dict) -> str:
     return entry.get("url") or entry.get("filnavn") or ""
 
 
+def _forget_ingested_key(name: str, entry: dict) -> dict:
+    """Drop one entry's key from the ingest manifest so the next build reads the
+    document again and replaces its nodes.
+
+    Deliberately non-destructive: nothing is removed from the vector index here.
+    That keeps list edits undoable — the dokumentbank only changes when a build
+    runs, and that build both prunes deleted documents and re-reads changed ones.
+    """
+    result = {"manifest_cleared": False, "error": ""}
+    if not entry:
+        return result
+    try:
+        from utils.create_lab_vectorindex.ingest_pdfs import (
+            _entry_key, _load_processed_doc_ids, _save_processed_doc_ids,
+        )
+        processed = _load_processed_doc_ids(INDEX_STORAGE, name)
+        key = _entry_key(entry)
+        if key in processed:
+            processed.discard(key)
+            _save_processed_doc_ids(INDEX_STORAGE, name, processed)
+            result["manifest_cleared"] = True
+    except Exception as e:
+        logging.warning("Manifest update failed for %s in %s: %s", entry, name, e)
+        result["error"] = str(e)
+    return result
+
+
 # ── Query-type prompt overrides ───────────────────────────────────────────────
 # Stored as {query_type: {field: text}} — only fields that differ from the
 # built-in QUERY_TYPES defaults are kept, so deleting an entry resets to default.
@@ -1513,15 +1540,20 @@ _DERIVE_META_KEYS = (
 
 
 def _derive_metadata_from_file(tmp_path: str, fname: str, max_chars: int = 20000) -> dict:
-    """Extract text from a PDF/PPTX on disk and ask the LLM for structured metadata.
-    Returns a dict limited to the known metadata keys."""
+    """Extract text from a PDF/PPTX/DOCX on disk and ask the LLM for structured
+    metadata. Returns a dict limited to the known metadata keys."""
     from pathlib import Path
     from langchain_core.messages import SystemMessage, HumanMessage
-    from llama_index.readers.file import PDFReader, PptxReader
+    from llama_index.readers.file import DocxReader, PDFReader, PptxReader
     from aggregate_workflow import _parse_json_block
 
     suffix = os.path.splitext(fname)[1].lower()
-    reader = PptxReader() if suffix in (".pptx", ".ppt") else PDFReader()
+    if suffix in (".pptx", ".ppt"):
+        reader = PptxReader()
+    elif suffix == ".docx":
+        reader = DocxReader()
+    else:
+        reader = PDFReader()
     pages = reader.load_data(file=Path(tmp_path))
     text = "\n\n".join((getattr(p, "text", "") or "") for p in pages).strip()
     if not text:
@@ -1639,8 +1671,8 @@ async def admin_derive_metadata():
         fname = _safe_filename(uploaded.filename or "")
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-    if not fname.lower().endswith((".pdf", ".pptx", ".ppt")):
-        return jsonify({"error": "Bare PDF/PPTX støttes for metadata-avledning"}), 415
+    if not fname.lower().endswith((".pdf", ".pptx", ".ppt", ".docx")):
+        return jsonify({"error": "Bare PDF, PPTX og DOCX støttes for metadata-avledning"}), 415
 
     import tempfile
     suffix = os.path.splitext(fname)[1].lower()
@@ -1728,6 +1760,81 @@ async def admin_create_index():
                     "query_types": qt_keys, "materialize_job_id": materialize_job_id})
 
 
+@app.delete("/admin/indexes")
+async def admin_delete_index():
+    """Remove a whole dokumentbank: its entries, its built index and its files.
+
+    Irreversible and large in blast radius, so the name has to be given twice —
+    `index_name` and a matching `confirm` — which makes an accidental or
+    mistargeted call fail instead of wiping the wrong bank.
+    """
+    name    = request.args.get("index_name", "")
+    confirm = request.args.get("confirm", "")
+    try:
+        _safe_index_name(name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if confirm != name:
+        return jsonify({"error": "Pass confirm=<index_name> matching index_name"}), 400
+
+    with _doc_store_lock:
+        data = _load_full_doc_store()
+        if name not in data:
+            return jsonify({"error": f"Index '{name}' not found"}), 404
+        entry_count = len(data.get(name) or [])
+        data.pop(name, None)
+        _save_full_doc_store(data)
+
+    import shutil
+    removed = {"entries": entry_count, "index_dir": False, "data_dir": False, "blobs": 0}
+
+    # Built index + ingest manifest
+    persist_dir = os.path.join(INDEX_STORAGE, name)
+    if os.path.isdir(persist_dir):
+        try:
+            shutil.rmtree(persist_dir)
+            removed["index_dir"] = True
+        except Exception as e:
+            logging.error("Could not delete index dir %s: %s", persist_dir, e)
+
+    # Uploaded source files
+    files_dir = os.path.join(DATA_DIR, name)
+    if os.path.isdir(files_dir):
+        try:
+            shutil.rmtree(files_dir)
+            removed["data_dir"] = True
+        except Exception as e:
+            logging.error("Could not delete data dir %s: %s", files_dir, e)
+
+    # Blob copies (no-op outside Azure)
+    for prefix in (f"{name}/", f"data/{name}/"):
+        try:
+            removed["blobs"] += azure_blob.delete_prefix(prefix) or 0
+        except Exception as e:
+            logging.warning("Blob cleanup failed for %s: %s", prefix, e)
+
+    # Pinned analysetyper
+    try:
+        with _index_qt_lock:
+            qt_map = _load_index_query_types()
+            if qt_map.pop(name, None) is not None:
+                _save_index_query_types(qt_map)
+    except Exception as e:
+        logging.warning("Could not drop query types for %s: %s", name, e)
+
+    # Drop it from the loaded set so /query and /health stop advertising it.
+    _indexes.pop(name, None)
+    try:
+        if name in _readiness["expected"]:
+            _readiness["expected"].remove(name)
+        _readiness["failed"].pop(name, None)
+        _set_ready_state()   # recomputes "loaded" from _indexes
+    except Exception as e:
+        logging.warning("Readiness update failed after deleting %s: %s", name, e)
+
+    return jsonify({"ok": True, "name": name, "removed": removed})
+
+
 @app.put("/admin/query-types/<qt>")
 async def admin_update_query_type(qt):
     """Save edited prompt text for a query type. Only fields that differ from the
@@ -1779,6 +1886,46 @@ async def admin_list_entries():
         data = _load_full_doc_store()
         entries = list(data.get(name, []))
     return jsonify({"index_name": name, "entries": entries})
+
+
+@app.get("/admin/reindex/pending")
+async def admin_reindex_pending():
+    """What an incremental build would change, from the ingest manifest.
+
+    Answers with the entries that have never been read (or were marked for a
+    re-read after an edit) and how many manifest keys no longer match anything
+    in the list. Keys are returned in the same form the admin list uses, so the
+    caller can flag the exact rows.
+    """
+    name = request.args.get("index_name", "")
+    try:
+        _safe_index_name(name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    with _doc_store_lock:
+        data = _load_full_doc_store()
+        entries = list(data.get(name, []))
+
+    try:
+        from utils.create_lab_vectorindex.ingest_pdfs import _entry_key, _load_processed_doc_ids
+        processed = _load_processed_doc_ids(INDEX_STORAGE, name)
+    except Exception as e:
+        logging.warning("Could not read ingest manifest for %s: %s", name, e)
+        # Unknown manifest → treat everything as unbuilt rather than claim it's done.
+        return jsonify({
+            "ok": True, "total": len(entries),
+            "to_ingest": [_entry_admin_key(e) for e in entries], "to_prune": 0,
+        })
+
+    live_keys = {_entry_key(e) for e in entries}
+    to_ingest = [_entry_admin_key(e) for e in entries if _entry_key(e) not in processed]
+    return jsonify({
+        "ok": True,
+        "total": len(entries),
+        "to_ingest": to_ingest,
+        "to_prune": len(processed - live_keys),
+    })
 
 
 @app.post("/admin/entries")
@@ -1863,7 +2010,10 @@ async def admin_add_entry():
             entries[old_idx] = entry
             data[name] = entries
             _save_full_doc_store(data)
-            return jsonify({"ok": True, "entry": entry, "replaced_key": replace_key})
+            # The replaced source is gone from the list — the next build prunes
+            # its nodes and reads the replacement.
+            purge = _forget_ingested_key(name, old)
+            return jsonify({"ok": True, "entry": entry, "replaced_key": replace_key, "purged": purge})
 
         new_key = _entry_admin_key(entry)
         dup_idx = next((i for i, e in enumerate(entries)
@@ -1886,7 +2036,11 @@ async def admin_add_entry():
             entries[dup_idx] = entry
             data[name] = entries
             _save_full_doc_store(data)
-            return jsonify({"ok": True, "entry": entry, "replaced_key": new_key})
+            # The upload above already replaced the file on disk. Clearing the
+            # manifest key makes the next build read the new document instead of
+            # skipping it as already ingested; the build replaces its nodes.
+            purge = _forget_ingested_key(name, old)
+            return jsonify({"ok": True, "entry": entry, "replaced_key": new_key, "purged": purge})
         entries.append(entry)
         data[name] = entries
         _save_full_doc_store(data)
@@ -1919,7 +2073,13 @@ async def admin_update_entry():
                 entries[i] = merged
                 data[name] = entries
                 _save_full_doc_store(data)
-                return jsonify({"ok": True, "entry": merged})
+                # Node metadata is baked in at ingest and is what /query filters
+                # on, so an edited title or segment is invisible until the
+                # document is read again. Clearing the manifest key schedules
+                # that re-read; the build replaces the old nodes rather than
+                # adding to them.
+                purge = _forget_ingested_key(name, e)
+                return jsonify({"ok": True, "entry": merged, "purged": purge})
     return jsonify({"error": "Entry not found"}), 404
 
 
@@ -1937,11 +2097,15 @@ async def admin_delete_entry():
     with _doc_store_lock:
         data = _load_full_doc_store()
         entries = list(data.get(name, []))
+        removed = next((e for e in entries if _entry_admin_key(e) == key), None)
         remaining = [e for e in entries if _entry_admin_key(e) != key]
         if len(remaining) == len(entries):
             return jsonify({"error": "Entry not found"}), 404
         data[name] = remaining
         _save_full_doc_store(data)
+
+    # Nothing to do to the index here: the next build notices the entry is gone
+    # from the list and prunes its nodes. That keeps the delete undoable.
     return jsonify({"ok": True, "removed_key": key})
 
 
