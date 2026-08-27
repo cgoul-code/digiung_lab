@@ -1109,11 +1109,11 @@ def _add_chunk_references(doc, chunks):
 
 
 def _render_risk_report(doc, result: dict, items: list, per_doc: list):
-    """Render the strategisk_risiko report: optional cross-document syntese (longlist)
-    followed by the always-present per-document analysekjede."""
-    # ── Syntese på tvers (longlist) — only when aggregation ran and produced content ──
+    """Render the strategisk_risiko report: optional cross-document syntese
+    followed by the evidence for it, broken down per finding."""
+    # ── Syntese på tvers — only when aggregation ran and produced content ──
     if result.get("aggregated") and (items or result.get("monstre")):
-        doc.add_heading("Syntese på tvers (longlist)", level=2)
+        doc.add_heading("Syntese på tvers av dokumentene", level=2)
         _add_bullets(doc, "Overordnede mønstre:", result.get("monstre"))
         for item in items:
             doc.add_heading(_xml_safe(item.get("label", "")), level=3)
@@ -1129,30 +1129,212 @@ def _render_risk_report(doc, result: dict, items: list, per_doc: list):
         _add_bullets(doc, "Usikkerhet og kunnskapshull:", result.get("usikkerhet_kunnskapshull"))
         _add_bullets(doc, "Spørsmål til ledergruppen:",   result.get("sporsmal_til_ledergruppen"))
 
-    # ── Analyse per dokument — alltid ──
-    if per_doc:
+    # ── Analyse per funn ──
+    # Without a synthesis there are no findings to hang documents on, so that
+    # case keeps the per-document listing.
+    if per_doc and result.get("aggregated") and items:
+        _render_risk_findings_detail(doc, items, per_doc)
+    elif per_doc:
         doc.add_heading("Analyse per dokument", level=2)
         for entry in per_doc:
             _doc_heading_with_link(doc, entry)
-            s = entry.get("structured") or {}
-            if s.get("relevans"):
-                p = doc.add_paragraph()
-                p.add_run("Relevans: ").bold = True
-                p.add_run(_xml_safe(s["relevans"]))
-            _add_bullets(doc, "Kildefunn:",            s.get("kildefunn"))
-            _add_bullets(doc, "Drivere:",              s.get("drivere"))
-            _add_bullets(doc, "Mulige sårbarheter:",   s.get("sarbarheter"))
-            _add_bullets(doc, "Mulige konsekvenser:",  s.get("konsekvenser"))
-            _add_bullets(doc, "Foreløpige risikoer:",  s.get("risikoer"))
-            _add_bullets(doc, "Avklaringsspørsmål:",   s.get("avklaringssporsmal"))
-            if s.get("kildegrunnlag_styrke"):
-                p = doc.add_paragraph()
-                p.add_run("Kildegrunnlagets styrke: ").bold = True
-                p.add_run(_xml_safe(s["kildegrunnlag_styrke"]))
-            if not s:  # defensive fallback
-                for finding in entry.get("findings", []):
-                    doc.add_paragraph(_xml_safe(finding), style="List Bullet")
-            _add_chunk_references(doc, entry.get("chunks"))
+            _risk_doc_body(doc, entry)
+
+
+def _risk_doc_body(doc, entry: dict) -> None:
+    """One document's full analysekjede, under a heading the caller has written."""
+    s = entry.get("structured") or {}
+    if s.get("relevans"):
+        p = doc.add_paragraph()
+        p.add_run("Relevans: ").bold = True
+        p.add_run(_xml_safe(s["relevans"]))
+    _add_bullets(doc, "Kildefunn:",            s.get("kildefunn"))
+    _add_bullets(doc, "Drivere:",              s.get("drivere"))
+    _add_bullets(doc, "Mulige sårbarheter:",   s.get("sarbarheter"))
+    _add_bullets(doc, "Mulige konsekvenser:",  s.get("konsekvenser"))
+    _add_bullets(doc, "Foreløpige risikoer:",  s.get("risikoer"))
+    _add_bullets(doc, "Avklaringsspørsmål:",   s.get("avklaringssporsmal"))
+    if s.get("kildegrunnlag_styrke"):
+        p = doc.add_paragraph()
+        p.add_run("Kildegrunnlagets styrke: ").bold = True
+        p.add_run(_xml_safe(s["kildegrunnlag_styrke"]))
+    if not s:  # defensive fallback
+        for finding in entry.get("findings", []):
+            doc.add_paragraph(_xml_safe(finding), style="List Bullet")
+    _add_chunk_references(doc, entry.get("chunks"))
+
+
+def _render_risk_findings_detail(doc, items: list, per_doc: list) -> None:
+    """Every risk area followed by the documents behind it and what each one
+    contributed — the report counterpart of the per-finding view on screen."""
+    by_title = {}
+    for entry in per_doc:
+        key = _norm_title(entry.get("tittel") or entry.get("filename") or "")
+        if key and key not in by_title:
+            by_title[key] = entry
+
+    cited = set()
+    doc.add_heading("Analyse per funn", level=2)
+    p = doc.add_paragraph("Hva som er trukket ut av hvert dokument bak det enkelte funnet.")
+    p.runs[0].italic = True
+
+    for item in items:
+        doc.add_heading(_xml_safe(item.get("label", "")), level=3)
+        if item.get("beskrivelse"):
+            doc.add_paragraph(_xml_safe(item["beskrivelse"]))
+
+        sources = item.get("sources") or []
+        if not sources:
+            doc.add_paragraph("Ingen kilder er registrert for dette funnet.").runs[0].italic = True
+            continue
+
+        for s in sources:
+            if isinstance(s, dict):
+                tittel, pages = s.get("tittel") or "", s.get("pages") or []
+            else:
+                tittel, pages = str(s), []
+            entry = by_title.get(_norm_title(tittel))
+            if entry is None:
+                # The synthesis named a source the per-document pass didn't
+                # produce — say so rather than drop the reference.
+                para = doc.add_paragraph(style="List Bullet")
+                para.add_run(_xml_safe(tittel)).bold = True
+                if pages:
+                    para.add_run(f" (s. {_xml_safe(', '.join(str(pg) for pg in pages))})")
+                para.add_run("  — ingen utdrag tilgjengelig").italic = True
+                continue
+            cited.add(_norm_title(tittel))
+            _doc_heading(doc, entry, level=4)
+            sd = entry.get("structured") or {}
+            if sd.get("relevans"):
+                para = doc.add_paragraph()
+                para.add_run("Relevans: ").bold = True
+                para.add_run(_xml_safe(sd["relevans"]))
+            extracted = sd.get("kildefunn") or entry.get("findings")
+            _add_bullets(doc, "Trukket ut fra dokumentet:", extracted)
+            _add_quotes(doc, _chunks_for(entry, pages))
+
+    leftovers = [e for e in per_doc
+                 if _norm_title(e.get("tittel") or e.get("filename") or "") not in cited]
+    if leftovers:
+        doc.add_heading("Dokumenter uten sitater i funnene over", level=2)
+        for entry in leftovers:
+            _doc_heading_with_link(doc, entry)
+            _risk_doc_body(doc, entry)
+
+
+def _norm_title(s: str) -> str:
+    """Loose key for matching a finding's source back to the document it came
+    from — the two are produced by different LLM passes, so spacing and casing
+    can't be relied on."""
+    return " ".join((s or "").split()).casefold()
+
+
+def _doc_heading(doc, entry, level):
+    """Document heading, linked to the source when there is a URL to link to."""
+    parts = [(entry.get("tittel") or entry.get("filename") or "").strip()]
+    if (entry.get("publisert_av") or "").strip():
+        parts.append(entry["publisert_av"].strip())
+    if entry.get("publisert_arstall") not in (None, ""):
+        parts.append(str(entry["publisert_arstall"]))
+    label = _xml_safe(" - ".join(p for p in parts if p))
+    p = doc.add_heading("", level=level)
+    url = (entry.get("kilde_url") or "").strip()
+    if url:
+        _add_hyperlink(p, url, label)
+    else:
+        p.add_run(label)
+    return p
+
+
+def _add_quotes(doc, chunks):
+    """Render passages as quotations, each with its page and a link back."""
+    for chunk in chunks:
+        excerpt = _xml_safe((chunk.get("excerpt") or "").strip())
+        if not excerpt:
+            continue
+        page = chunk.get("page")
+        p = doc.add_paragraph(style="List Bullet 2")
+        if page is not None:
+            p.add_run(f"[Side {_xml_safe(str(page))}] ").bold = True
+        p.add_run(f"\u00ab{excerpt}\u00bb").italic = True
+        deep = (chunk.get("deep_link") or "").strip()
+        if deep:
+            p.add_run("  ")
+            _add_hyperlink(p, deep, "\u2197 \u00e5pne sitatet p\u00e5 nettsiden")
+
+
+def _chunks_for(entry, pages):
+    """Passages from one document backing one finding. When the finding names
+    pages, those win; otherwise everything the document contributed is shown,
+    since narrowing further would be guesswork."""
+    chunks = entry.get("chunks") or []
+    if not pages:
+        return chunks
+    want = {str(p).strip() for p in pages if p not in (None, "")}
+    hit = [c for c in chunks if str(c.get("page")).strip() in want]
+    return hit or chunks
+
+
+def _render_findings_detail(doc, items, per_doc):
+    """Per-finding drill-down: every finding followed by the documents behind it
+    and the passages that support it.
+
+    This replaced a per-document listing. Grouping by document meant the
+    evidence for a single finding was scattered across the report and had to be
+    reassembled by hand; grouping by finding puts the claim and its citations
+    together.
+    """
+    by_title = {}
+    for entry in per_doc:
+        key = _norm_title(entry.get("tittel") or entry.get("filename") or "")
+        if key and key not in by_title:
+            by_title[key] = entry
+
+    cited = set()
+    doc.add_heading("Funnene i detalj", level=2)
+
+    for item in items:
+        doc.add_heading(_xml_safe(item.get("label", "")), level=3)
+        if item.get("description"):
+            doc.add_paragraph(_xml_safe(item["description"]))
+
+        sources = item.get("sources") or []
+        if not sources:
+            doc.add_paragraph("Ingen kilder er registrert for dette funnet.").runs[0].italic = True
+            continue
+
+        for s in sources:
+            if isinstance(s, dict):
+                tittel, pages = s.get("tittel") or "", s.get("pages") or []
+            else:
+                tittel, pages = str(s), []
+            key = _norm_title(tittel)
+            entry = by_title.get(key)
+            if entry is None:
+                # The synthesis named a source the per-document pass didn't
+                # produce — say so rather than drop the reference.
+                p = doc.add_paragraph(style="List Bullet")
+                p.add_run(_xml_safe(tittel)).bold = True
+                if pages:
+                    p.add_run(f" (s. {_xml_safe(', '.join(str(pg) for pg in pages))})")
+                p.add_run("  \u2014 ingen sitater tilgjengelig").italic = True
+                continue
+            cited.add(key)
+            _doc_heading(doc, entry, level=4)
+            _add_quotes(doc, _chunks_for(entry, pages))
+
+    # Documents the synthesis never cited still carry their own findings, and
+    # dropping them silently would understate what the analysis looked at.
+    leftovers = [e for e in per_doc
+                 if _norm_title(e.get("tittel") or e.get("filename") or "") not in cited]
+    if leftovers:
+        doc.add_heading("Dokumenter uten sitater i funnene over", level=2)
+        for entry in leftovers:
+            _doc_heading(doc, entry, level=3)
+            for finding in entry.get("findings", []):
+                doc.add_paragraph(_xml_safe(finding), style="List Bullet")
+            _add_quotes(doc, entry.get("chunks") or [])
 
 
 def _generate_report_docx(result: dict) -> bytes:
@@ -1212,42 +1394,17 @@ def _generate_report_docx(result: dict) -> bytes:
                         labels.append(str(s))
                 p.add_run("; ".join(_xml_safe(l) for l in labels)).italic = True
 
-    if per_doc:
-        doc.add_heading("Funn per dokument", level=2)
+    # Without a synthesis there are no findings to hang documents on, so that
+    # case keeps a plain per-document listing.
+    if items:
+        _render_findings_detail(doc, items, per_doc)
+    elif per_doc:
+        doc.add_heading("Analyse per dokument", level=2)
         for entry in per_doc:
-            tittel_text = _xml_safe(entry.get("tittel") or entry.get("filename", ""))
-            publisert_av = _xml_safe((entry.get("publisert_av") or "").strip())
-            publisert_arstall = entry.get("publisert_arstall")
-            arstall_text = _xml_safe(str(publisert_arstall)) if publisert_arstall not in (None, "") else ""
-            heading_parts = [tittel_text]
-            if publisert_av:
-                heading_parts.append(publisert_av)
-            if arstall_text:
-                heading_parts.append(arstall_text)
-            heading_label = " - ".join(heading_parts)
-            kilde_url = (entry.get("kilde_url") or "").strip()
-            heading_p = doc.add_heading("", level=3)
-            if kilde_url:
-                _add_hyperlink(heading_p, kilde_url, heading_label)
-            else:
-                heading_p.add_run(heading_label)
+            _doc_heading(doc, entry, level=3)
             for finding in entry.get("findings", []):
                 doc.add_paragraph(_xml_safe(finding), style="List Bullet")
-            chunks = entry.get("chunks") or []
-            if chunks:
-                doc.add_paragraph("Kildehenvisninger:", style="Intense Quote")
-                for chunk in chunks:
-                    page = chunk.get("page")
-                    excerpt = _xml_safe((chunk.get("excerpt") or "").strip())
-                    deep = (chunk.get("deep_link") or "").strip()
-                    label = f"[Side {page}]  " if page is not None else ""
-                    p = doc.add_paragraph(style="List Bullet 2")
-                    if label:
-                        p.add_run(label).bold = True
-                    p.add_run(excerpt)
-                    if deep:
-                        p.add_run("  ")
-                        _add_hyperlink(p, deep, "↗ åpne sitatet på nettsiden")
+            _add_quotes(doc, entry.get("chunks") or [])
 
     buf = BytesIO()
     doc.save(buf)

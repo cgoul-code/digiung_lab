@@ -94,7 +94,9 @@ def _load_and_validate_document_store(json_path: str, index_name: str, check_url
     """
     Load document_store.json and verify every entry up front:
       - file entries  → the file must exist on disk
-      - url entries   → the URL must be reachable (when check_urls is True)
+      - url entries   → the URL must be reachable (only when check_urls is True;
+                        the incremental ingest checks these later, once it knows
+                        which URLs it will actually fetch)
     Supports both the legacy flat-list format and the new dict-of-lists format:
       {"IndexName": [...], "OtherIndex": [...]}
     Raises DocumentStoreValidationError with a detailed message if anything is wrong,
@@ -268,6 +270,36 @@ def _resolve_source_path(filnavn: str, data_dir: str = None, index_name: str = N
     return Path(raw)  # fall back to literal; caller reports a clear "missing" error
 
 # ── Index helpers ─────────────────────────────────────────────────────────────
+
+# How many documents to insert before writing the index to disk. Small enough
+# that a crash costs little rework, large enough that the O(n) persist isn't
+# paid per document.
+PERSIST_EVERY = 10
+
+
+def _open_index(name: str, storage: str):
+    """The bank's index, or None when nothing has been built yet."""
+    persist_dir = os.path.join(storage, name)
+    if os.path.isfile(os.path.join(persist_dir, "docstore.json")):
+        logging.info("Loading existing index from %s", persist_dir)
+        return load_index_from_storage(StorageContext.from_defaults(persist_dir=persist_dir))
+    return None
+
+
+def _insert_documents(index, documents: list[Document]):
+    """Insert into an already-open index, replacing any earlier version of the
+    same document. Returns the index (created here when there wasn't one)."""
+    if index is None:
+        return VectorStoreIndex.from_documents(documents)
+    for ref_id in dict.fromkeys(d.doc_id for d in documents if getattr(d, "doc_id", None)):
+        try:
+            index.delete_ref_doc(ref_id, delete_from_docstore=True)
+        except Exception as e:
+            logging.debug("Nothing to replace for ref_doc_id %r (%s)", ref_id, e)
+    for doc in documents:
+        index.insert(doc)
+    return index
+
 
 def _upsert_docs_into_index(
     name: str,
@@ -521,8 +553,9 @@ def run_incremental_ingest(
             except Exception:
                 logging.warning("on_progress callback raised", exc_info=True)
 
-    # Load + validate — fails here if any file is missing or any URL is unreachable
-    entries = _load_and_validate_document_store(document_store_path, name, check_urls=check_urls,
+    # Load + validate. Files are checked here (local, instant); URLs wait until
+    # the manifest tells us which ones are actually going to be fetched.
+    entries = _load_and_validate_document_store(document_store_path, name, check_urls=False,
                                                 data_dir=data_dir)
 
     processed = _load_processed_doc_ids(storage, name)
@@ -538,12 +571,41 @@ def run_incremental_ingest(
         _emit({"event": "pruned", "count": pruned,
                "message": f"Fjernet {pruned} slettet dokument(er) fra dokumentbanken"})
 
+    if check_urls:
+        # Only what this run will fetch. Links already in the manifest are
+        # skipped below without a network call, so probing them would cost a
+        # timeout each and report failures that never affect the outcome.
+        _validate_urls([e for e in entries if _entry_key(e) not in processed])
+
     total = len(entries)
     logging.info("Found %d entries in document store, %d already ingested", total, len(processed))
     _emit({"event": "start", "total": total, "already_ingested": len(processed)})
 
     new_count = 0
     failed_count = 0
+    index = _open_index(name, storage)
+    persist_dir = os.path.join(storage, name)
+    pending: list[dict] = []   # inserted into the open index, not yet on disk
+
+    def _flush():
+        """Write the index, then record the batch as ingested.
+
+        The order matters: a manifest written before the persist would, after a
+        crash, claim documents the index never received — and they would then be
+        skipped forever."""
+        if not pending or index is None:
+            return
+        os.makedirs(persist_dir, exist_ok=True)
+        index.storage_context.persist(persist_dir=persist_dir)
+        for item in pending:
+            processed.add(item["key"])
+        _save_processed_doc_ids(storage, name, processed)
+        logging.info("  ✓ Persisted %d document(s)", len(pending))
+        for item in pending:
+            _emit({"event": "doc_done", "index": item["index"], "total": total,
+                   "key": item["key"], "tittel": item["tittel"]})
+        pending.clear()
+
     for idx, entry in enumerate(entries):
         key = _entry_key(entry)
         tittel = entry.get("tittel") or key
@@ -558,12 +620,11 @@ def run_incremental_ingest(
         try:
             pages = load_entry_as_documents(entry, data_dir=data_dir, index_name=name)
             logging.info("  → %d document(s) loaded", len(pages))
-            _upsert_docs_into_index(name=name, storage=storage, documents=pages)
-            processed.add(key)
-            _save_processed_doc_ids(storage, name, processed)
+            index = _insert_documents(index, pages)
+            pending.append({"key": key, "tittel": tittel, "index": idx})
             new_count += 1
-            logging.info("  ✓ Done")
-            _emit({"event": "doc_done", "index": idx, "total": total, "key": key, "tittel": tittel})
+            if len(pending) >= PERSIST_EVERY:
+                _flush()
         except requests.HTTPError as e:
             failed_count += 1
             logging.warning("  ✗ Skipping %s: %s", key, e)
@@ -572,6 +633,8 @@ def run_incremental_ingest(
             failed_count += 1
             logging.error("  ✗ Failed for %s; will retry on next run", key, exc_info=True)
             _emit({"event": "doc_failed", "index": idx, "total": total, "key": key, "tittel": tittel, "message": str(e)})
+
+    _flush()
 
     logging.info("Ingestion complete. Total ingested: %d / %d", len(processed), total)
     _emit({"event": "done", "total": total, "new": new_count, "failed": failed_count, "processed": len(processed)})

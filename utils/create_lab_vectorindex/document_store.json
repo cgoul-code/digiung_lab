@@ -481,9 +481,101 @@
       "publisert_av": "Justis- og beredskapsdepartementet",
       "publisert_arstall": null,
       "kilde_url": "https://www.regjeringen.no/no/aktuelt/skal-gjore-norge-mer-motstandsdyktig-tre-kritiske-samfunnsomrader-prioriteres-i-den-forste-langtidsplanen-for-sivil-beredskap/id3144406/"
+    },
+    {
+      "tittel": "Clarification on the classification of follow-up formulas for children 6-36 months as breastmilk substitutes",
+      "filnavn": "./data\\Strategisk_risiko\\WHO-NMH-NHD-18.11-eng.pdf",
+      "publisert_arstall": 2018,
+      "publisert_av": "World Health Organization",
+      "type_kilde": "Informasjonsnotat",
+      "malgruppe": "Barn 6-36 måneder, sped- og småbarn, samt beslutningstakere og fagpersoner innen ernæring og folkehelse",
+      "antall_deltakere": null,
+      "segment": "Barn og ernæring",
+      "oppsummering": "Dokumentet er et informasjonsnotat fra WHO som forklarer hvorfor oppfølgingsmelk for barn 6-36 måneder skal klassifiseres som morsmelkerstatning etter den internasjonale koden for markedsføring av brystmelkerstatninger. Notatet viser til WHO- og UNICEF-anbefalinger om amming opp til to år eller lenger, og oppsummerer forskning som viser helsegevinster for både barn og mødre ved fortsatt amming. Det argumenteres for at slike produkter i praksis erstatter brystmelk, og derfor faller inn under kodens virkeområde. WHO understreker også at klassifiseringen bygger på produktets funksjon og markedsføring, ikke bare sammensetningen. Konklusjonen er at beskyttelsen av amming også må omfatte oppfølgingsmelk for barn opp til 3 år.",
+      "kilde_url": "",
+      "kilde_type": ""
+    },
+    {
+      "tittel": "The International Code of Marketing of Breast-milk Substitutes: Frequently Asked Questions (2017 Update)",
+      "filnavn": "./data\\Strategisk_risiko\\WHO-NMH-NHD-17.1-eng.pdf",
+      "publisert_arstall": 2017,
+      "publisert_av": "World Health Organization",
+      "type_kilde": "Veileder",
+      "malgruppe": "Beslutningstakere, helsearbeidere og allmennheten",
+      "antall_deltakere": null,
+      "segment": "Barn og ernæring",
+      "oppsummering": "Dokumentet er en spørsmål-og-svar-publikasjon fra WHO om den internasjonale koden for markedsføring av morsmelkerstatninger. Det forklarer formålet med koden, hvilke produkter og markedsføringspraksiser som omfattes, og hvorfor regulering er viktig for å beskytte og fremme amming. Publikasjonen oppsummerer også WHO-anbefalinger for sped- og småbarnsernæring og beskriver senere WHA-resolusjoner som utdyper og utvider kodens anvendelse. Målsettingen er å gi lett tilgjengelig og detaljert informasjon til beslutningstakere, helsepersonell og andre som arbeider med eller berøres av regelverket.",
+      "kilde_url": "",
+      "kilde_type": ""
     }
   ],
-  "Test_strategi": [],
+  "Test_strategi": [
+    {
+      "tittel": "The International Code of Marketing of Breastmilk Substitutes: A guide for health workers",
+      "filnavn": "./data\\Test_strategi\\UUK-2025-Guide-to-the-Code-HCW.pdf",
+      "publisert_arstall": 2025,
+      "publisert_av": "UNICEF UK Baby Friendly Initiative",
+      "type_kilde": "Veileder",
+      "malgruppe": "Helsearbeidere og tidligårsansatte som arbeider med familier, samt tjenester som søker Baby Friendly-akkreditering i Storbritannia",
+      "antall_deltakere": null,
+      "segment": "Spedbarnsernæring",
+      "oppsummering": "Dokumentet er en veileder om International Code of Marketing of Breastmilk Substitutes, rettet mot helsearbeidere og andre fagpersoner som arbeider med spedbarn og familier. Veilederen forklarer hvordan koden skal beskytte amming og sikre at familier får nøytral, korrekt informasjon om spedbarnsernæring uten kommersiell påvirkning. Den beskriver regelverk, markedsføring, interessekonflikter, informasjon til helsepersonell og praktisk anvendelse av koden i tjenester og utdanning. Dokumentet er oppdatert i 2025 og er forankret i UNICEF UKs Baby Friendly Initiative.",
+      "kilde_url": "",
+      "kilde_type": ""
+    },
+    {
+      "tittel": "9241541601",
+      "filnavn": "./data\\Test_strategi\\9241541601.pdf",
+      "publisert_arstall": null,
+      "publisert_av": "",
+      "type_kilde": "",
+      "malgruppe": "",
+      "antall_deltakere": null,
+      "segment": "",
+      "oppsummering": "",
+      "kilde_url": "",
+      "kilde_type": ""
+    },
+    {
+      "tittel": "Clarification on sponsorship of health professional and scientific meetings by companies that market foods for infants and young children",
+      "filnavn": "./data\\Test_strategi\\9789240074422-eng.pdf",
+      "publisert_arstall": 2023,
+      "publisert_av": "World Health Organization",
+      "type_kilde": "Informasjonsnotat",
+      "malgruppe": "Helsepersonell, vitenskapelige og profesjonelle foreninger, møtearrangører og myndigheter",
+      "antall_deltakere": null,
+      "segment": "Barn og ernæring",
+      "oppsummering": "Dokumentet er et informasjonsnotat fra WHO som presiserer hva som regnes som sponsing av faglige og vitenskapelige møter fra selskaper som markedsfører mat og drikke for spedbarn og småbarn. Notatet bygger på WHO-veiledningen fra 2016 og slår fast at slike selskaper ikke bør få sponse møter for helsepersonell eller vitenskapelige arrangementer, fordi dette kan skape interessekonflikter og påvirke faglige anbefalinger. Det beskriver ulike former for sponsing, blant annet økonomisk støtte, annonser, utstillingsplass, støtte til enkeltøkter, stipender og deling av deltakerlister. Hovedbudskapet er at profesjonsforeninger og arrangører verken bør be om eller akseptere slik sponsing, uavhengig av om støtten er økonomisk eller i naturalia.",
+      "kilde_url": "",
+      "kilde_type": ""
+    },
+    {
+      "tittel": "Regulating the digital marketing of breast-milk substitutes",
+      "filnavn": "./data\\Test_strategi\\B156_(30)-en.pdf",
+      "publisert_arstall": 2025,
+      "publisert_av": "Verdens helseorganisasjon (WHO) Executive Board",
+      "type_kilde": "Resolusjon",
+      "malgruppe": "Medlemsstater, sivilsamfunn, helsemyndigheter, gravide kvinner, foreldre og omsorgspersoner",
+      "antall_deltakere": null,
+      "segment": "Barn og ernæring",
+      "oppsummering": "Dokumentet er en beslutning fra WHOs Executive Board om å anbefale en resolusjon til Verdens helseforsamling om regulering av digital markedsføring av morsmelkerstatning. Teksten understreker at digital markedsføring, inkludert influensermarkedsføring, undergraver amming og god sped- og småbarnsernæring, og at dagens frivillige tiltak ikke er tilstrekkelige. Medlemsstatene oppfordres til å utvikle og styrke bindende regulering, overvåking og håndheving av markedsføring i digitale miljøer. Dokumentet ber også om tiltak mot interessekonflikter og om teknisk støtte fra WHO for implementering og evaluering av slike reguleringer.",
+      "kilde_url": "",
+      "kilde_type": ""
+    },
+    {
+      "tittel": "Clarification on the classification of follow-up formulas for children 6-36 months as breastmilk substitutes",
+      "filnavn": "./data\\Test_strategi\\WHO-NMH-NHD-18.11-eng.pdf",
+      "publisert_arstall": 2018,
+      "publisert_av": "World Health Organization",
+      "type_kilde": "Informasjonsnotat",
+      "malgruppe": "Barn 6-36 måneder, spedbarn og småbarn, samt aktører som arbeider med ernæring og markedsføring av morsmelkerstatninger",
+      "antall_deltakere": null,
+      "segment": "Barn og ernæring",
+      "oppsummering": "Dokumentet er et informasjonsnotat fra WHO som forklarer hvorfor oppfølgingsmelk for barn 6-36 måneder skal klassifiseres som brystmelkerstatning. Notatet viser til at fortsatt amming opp til to år eller lenger gir betydelige helsegevinster for både barn og mor, blant annet redusert dødelighet, bedre ernæring og lavere risiko for overvekt hos barn. WHO argumenterer for at slike produkter i praksis erstatter brystmelk, og derfor faller inn under den internasjonale koden for markedsføring av brystmelkerstatninger. Klassifiseringen begrunnes ut fra produktets funksjon og markedsføring, ikke bare sammensetning. Dokumentet konkluderer med at denne tolkningen er i tråd med WHOs retningslinjer og eksisterende politikk.",
+      "kilde_url": "",
+      "kilde_type": ""
+    }
+  ],
   "Test2_strategisk_risiko": [
     {
       "antall_deltakere": null,
@@ -578,6 +670,47 @@
       "segment": "Barn og ernæring",
       "tittel": "Clarification on sponsorship of health professional and scientific meetings by companies that market foods for infants and young children",
       "type_kilde": "Informasjonsnotat"
+    }
+  ],
+  "Test_strategi_3": [
+    {
+      "tittel": "The International Code of Marketing of Breastmilk Substitutes: A guide for health workers",
+      "filnavn": "./data\\Test_strategi_3\\UUK-2025-Guide-to-the-Code-HCW.pdf",
+      "publisert_arstall": 2025,
+      "publisert_av": "UNICEF UK Baby Friendly Initiative",
+      "type_kilde": "Veileder",
+      "malgruppe": "Helsearbeidere og tidligårspersonell som arbeider med familier",
+      "antall_deltakere": null,
+      "segment": "Spedbarnsernæring",
+      "oppsummering": "Dokumentet er en praktisk veileder om International Code of Marketing of Breastmilk Substitutes, rettet mot helsearbeidere og andre fagpersoner som arbeider med spedbarn og familier. Veilederen forklarer formålet med koden, relevante regelverk og hvordan markedsføring av morsmelkerstatning og beslektede produkter kan påvirke amming og informerte valg. Den beskriver også temaer som reklame, innkjøp og utdeling av morsmelkerstatning i tjenester, informasjon til foreldre, interessekonflikter og forskning. Dokumentet er oppdatert i 2025 og er laget for å støtte implementering av Baby Friendly-standardene i Storbritannia.",
+      "kilde_url": "",
+      "kilde_type": ""
+    },
+    {
+      "tittel": "9241541601",
+      "filnavn": "./data\\Test_strategi_3\\9241541601.pdf",
+      "publisert_arstall": null,
+      "publisert_av": "",
+      "type_kilde": "",
+      "malgruppe": "",
+      "antall_deltakere": null,
+      "segment": "",
+      "oppsummering": "",
+      "kilde_url": "",
+      "kilde_type": ""
+    },
+    {
+      "tittel": "Clarification on sponsorship of health professional and scientific meetings by companies that market foods for infants and young children",
+      "filnavn": "./data\\Test_strategi_3\\9789240074422-eng.pdf",
+      "publisert_arstall": 2023,
+      "publisert_av": "World Health Organization",
+      "type_kilde": "Informasjonsnotat",
+      "malgruppe": "Helsepersonell, vitenskapelige og profesjonelle foreninger, møtearrangører og myndigheter",
+      "antall_deltakere": null,
+      "segment": "Barn og ernæring",
+      "oppsummering": "Dokumentet er et informasjonsnotat fra WHO som presiserer hva som regnes som sponsing av faglige og vitenskapelige møter fra selskaper som markedsfører mat og drikke for spedbarn og småbarn. Notatet bygger på WHO-veiledningen fra 2016 og slår fast at slike selskaper ikke bør få sponse møter for helsepersonell eller vitenskapelige arrangementer, fordi dette kan skape interessekonflikter og påvirke faglige anbefalinger. Det beskriver ulike former for sponsing, blant annet økonomisk støtte, annonser, utstillingsplass, støtte til enkeltsesjoner, stipender og deling av deltakerlister. Hovedbudskapet er at profesjonsforeninger og arrangører verken bør be om eller akseptere slik sponsing, uavhengig av om støtten er økonomisk eller i naturalia.",
+      "kilde_url": "",
+      "kilde_type": ""
     }
   ]
 }

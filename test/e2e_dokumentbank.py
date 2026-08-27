@@ -20,7 +20,6 @@ Exit code is 0 only if every step passed.
 """
 import argparse
 import io
-import json
 import sys
 import time
 import uuid
@@ -224,9 +223,26 @@ class Api:
         return False, f"timed out after {timeout}s", events
 
     def query(self, bank, question, top_k=20):
-        res = self.post("/query", json={"question": question, "index_name": bank,
-                                        "top_k": top_k, "cutoff": 0.0})
-        return self.json(res) if res.ok else None
+        """Returns (data, err). A build reloads the index, and the server can
+        briefly report not-ready straight afterwards, so one retry."""
+        for attempt in (1, 2):
+            res = self.post("/query", json={"question": question, "index_name": bank,
+                                            "top_k": top_k, "cutoff": 0.0})
+            if res.ok:
+                return self.json(res), None
+            if attempt == 1 and res.status_code in (503, 502, 504):
+                time.sleep(5)
+                continue
+            return None, f"HTTP {res.status_code} {res.text[:160]}"
+        return None, "unreachable"
+
+    def pending(self, bank):
+        """What a build still has to do, from the ingest manifest."""
+        res = self.get(f"/admin/reindex/pending?index_name={bank}")
+        if not res.ok:
+            return None, f"HTTP {res.status_code}"
+        d = self.json(res)
+        return (len(d.get("to_ingest") or []), d.get("to_prune", 0)), None
 
     def analyse(self, bank, question, query_type="free", timeout=ANALYSIS_TIMEOUT):
         res = self.post("/aggregate/stream", json={
@@ -261,12 +277,11 @@ class Api:
         return None, f"timed out after {timeout}s"
 
 
-def sources_contain(result, marker):
-    """True when the marker turns up anywhere in the answer or its sources."""
-    if not result:
-        return False
-    blob = json.dumps(result, ensure_ascii=False).upper()
-    return marker.upper() in blob
+def cited_files(result):
+    """Filenames the answer actually drew on. Only `sources` counts: the
+    response also echoes the question, and the model tends to repeat wording
+    from it in the answer, so anything wider matches itself."""
+    return {(s.get("filename") or "").lower() for s in (result or {}).get("sources") or []}
 
 
 # ── The run ───────────────────────────────────────────────────────────────────
@@ -317,9 +332,11 @@ def run(args):
         rep.step(3, "Oppdater dokumentbanken")
         ok, status, _ = api.reindex(bank, "incremental")
         rep.record("inkrementell bygging", ok, status)
-        hit = api.query(bank, f"Hva staar det om {docs[0]['marker']}?")
-        rep.record("dokumentet er soekbart", sources_contain(hit, docs[0]["marker"]),
-                   "kjennemerket finnes i svaret/kildene")
+        counts, perr = api.pending(bank)
+        rep.record("manifestet er ajour", counts == (0, 0), perr or f"to_ingest/to_prune={counts}")
+        hit, qerr = api.query(bank, "Hva sier dokumentet om skolefravaer blant ungdom?")
+        rep.record("dokumentet er soekbart", docs[0]["filename"] in cited_files(hit),
+                   qerr or f"kilder={sorted(cited_files(hit))}")
 
         # 4 ── add three more, build again
         rep.step(4, "Legg til 3 nye dokumenter og oppdater")
@@ -333,8 +350,11 @@ def run(args):
         skipped = sum(1 for e in events if e.get("event") == "skip")
         rep.record("den første ble hoppet over", skipped >= 1,
                    f"{skipped} skip-hendelser — bare de nye leses")
-        hit = api.query(bank, f"Hva staar det om {docs[3]['marker']}?")
-        rep.record("nytt dokument er soekbart", sources_contain(hit, docs[3]["marker"]))
+        counts, perr = api.pending(bank)
+        rep.record("manifestet er ajour", counts == (0, 0), perr or f"to_ingest/to_prune={counts}")
+        hit, qerr = api.query(bank, "Hva sier dokumentene om frafall fra organisert idrett?")
+        rep.record("nytt dokument er soekbart", docs[3]["filename"] in cited_files(hit),
+                   qerr or f"kilder={sorted(cited_files(hit))}")
 
         # 5 ── delete one, build again
         rep.step(5, "Slett ett dokument og oppdater")
@@ -348,22 +368,36 @@ def run(args):
             rep.record("DELETE /admin/entries", d.ok, f"HTTP {d.status_code}")
         rep.record("listen har 3 oppføringer", len(api.entries(bank) or []) == 3)
 
-        ok, status, _ = api.reindex(bank, "incremental")
+        counts, perr = api.pending(bank)
+        rep.record("banken vet at ett dokument skal fjernes", counts == (0, 1),
+                   perr or f"to_ingest/to_prune={counts}")
+
+        ok, status, events = api.reindex(bank, "incremental")
         rep.record("inkrementell bygging", ok, status)
-        hit = api.query(bank, f"Hva staar det om {victim['marker']}?")
-        gone = not sources_contain(hit, victim["marker"])
-        rep.record("slettet innhold er borte fra banken", gone,
-                   "" if gone else "innholdet ligger igjen — serveren mangler prune ved oppdatering")
+        pruned = [e for e in events if e.get("event") == "pruned"]
+        rep.record("byggingen ryddet bort dokumentet", bool(pruned),
+                   pruned[0].get("message") if pruned else "ingen pruned-hendelse")
+        counts, perr = api.pending(bank)
+        rep.record("ingenting gjenstaar etter oppryddingen", counts == (0, 0),
+                   perr or f"to_ingest/to_prune={counts}")
+        hit, qerr = api.query(bank, "Hva sier dokumentene om ensomhet og soevnproblemer?")
+        rep.record("slettet dokument gir ingen treff", victim["filename"] not in cited_files(hit),
+                   qerr or f"kilder={sorted(cited_files(hit))}")
 
         # 6 ── full rebuild
         rep.step(6, "Regenerer hele dokumentbanken")
         ok, status, _ = api.reindex(bank, "full")
         rep.record("full ombygging", ok, status)
         rep.record("listen er uendret (3)", len(api.entries(bank) or []) == 3)
-        hit = api.query(bank, f"Hva staar det om {docs[0]['marker']}?")
-        rep.record("gjenvaerende dokument er soekbart", sources_contain(hit, docs[0]["marker"]))
-        hit = api.query(bank, f"Hva staar det om {victim['marker']}?")
-        rep.record("slettet dokument er fortsatt borte", not sources_contain(hit, victim["marker"]))
+        counts, perr = api.pending(bank)
+        rep.record("manifestet er ajour", counts == (0, 0), perr or f"to_ingest/to_prune={counts}")
+        hit, qerr = api.query(bank, "Hva sier dokumentet om skolefravaer blant ungdom?")
+        rep.record("gjenvaerende dokument er soekbart", docs[0]["filename"] in cited_files(hit),
+                   qerr or f"kilder={sorted(cited_files(hit))}")
+        hit, qerr = api.query(bank, "Hva sier dokumentene om ensomhet og soevnproblemer?")
+        rep.record("slettet dokument er fortsatt borte", victim["filename"] not in cited_files(hit),
+                   qerr or f"kilder={sorted(cited_files(hit))}")
+
 
         # 7 ── analysis
         rep.step(7, "Kjør en analyse")
