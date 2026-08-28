@@ -47,7 +47,7 @@ QUERY_TYPES = {
     "problems": {
         "extract_system": """Du er en faglig assistent som analyserer forskningsrapporter om barn og unge i Norge.
 Trekk ut konkrete problemer og utfordringer unge mennesker møter, basert på dokumentet du får.
-Svar KUN med en punktliste på norsk. Hvert punkt = ett konkret problem.
+Svar KUN med en punktliste. Hvert punkt = ett konkret problem.
 Hvis dokumentet ikke er relevant, svar: INGEN RELEVANTE FUNN.""",
 
         "extract_prompt": """Spørsmål: {question}
@@ -75,7 +75,7 @@ Aggreger og strukturer som beskrevet.""",
         "extract_system": """Du er en faglig assistent. Din oppgave er å identifisere kritiske øyeblikk eller vendepunkter
 i unge menneskers liv som beskrives i forskningsdokumentet du får.
 Et kritisk øyeblikk er en situasjon, hendelse eller livsfase som har stor innvirkning på den unges utvikling eller helse.
-Svar KUN med en punktliste på norsk. Hvert punkt = ett kritisk øyeblikk eller vendepunkt.
+Svar KUN med en punktliste. Hvert punkt = ett kritisk øyeblikk eller vendepunkt.
 Hvis dokumentet ikke er relevant, svar: INGEN RELEVANTE FUNN.""",
 
         "extract_prompt": """Spørsmål: {question}
@@ -138,7 +138,7 @@ Lag {n_personas} personas basert på disse mønstrene.""",
     "free": {
         "extract_system": """Du er en faglig assistent som analyserer forskningsrapporter om barn og unge i Norge.
 Svar på spørsmålet du får, basert på innholdet i dokumentet.
-Svar med en kort punktliste på norsk med de viktigste funnene relatert til spørsmålet.
+Svar med en kort punktliste med de viktigste funnene relatert til spørsmålet.
 Hvis dokumentet ikke er relevant, svar: INGEN RELEVANTE FUNN.""",
 
         "extract_prompt": """Spørsmål: {question}
@@ -241,8 +241,8 @@ Lag en syntese på tvers (longlist) som beskrevet.""",
 Du analyserer ETT kildedokument om gangen og trekker ut KUN det som er relevant for spørsmålet.
 For hvert relevant punkt: gjengi hva dokumentet faktisk sier, og oppgi presis forankring (artikkel/avsnitt i Koden, resolusjonsnummer/-år, eller trinn i Baby-Friendly-standarden) når det fremgår av dokumentet.
 Ikke konkluder bastant på tvers av kilder her — det gjøres i syntesen. Ikke dikt opp bestemmelser som ikke står i dokumentet.
-Kildene kan være på engelsk; svar likevel på norsk.
-Svar KUN med en punktliste på norsk. Hvis dokumentet ikke er relevant for spørsmålet, svar: INGEN RELEVANTE FUNN.""",
+Kildene kan være på et annet språk enn svarspråket; svar likevel på det språket som er angitt til slutt.
+Svar KUN med en punktliste. Hvis dokumentet ikke er relevant for spørsmålet, svar: INGEN RELEVANTE FUNN.""",
 
         "extract_prompt": """Spørsmål: {question}
 
@@ -253,7 +253,7 @@ Trekk ut bestemmelser, vilkår, definisjoner og henvisninger i dette dokumentet 
 
         "aggregate_system": """Du er fagperson på WHO-koden, WHA-resolusjonene og Baby-Friendly-standarden. Du får utdrag fra flere kilder og skal gi ETT tydelig, etterprøvbart svar på spørsmålet.
 Bygg svaret KUN på utdragene; ikke legg til regler som ikke er forankret i dem. Hvis kildene er utilstrekkelige eller spriker, si det eksplisitt i konklusjonen («Uklart») og forklar hvorfor.
-Kildene kan være på engelsk; svar likevel på norsk.
+Kildene kan være på et annet språk enn svarspråket; svar likevel på det språket som er angitt til slutt.
 
 Svar KUN i dette JSON-formatet (ingen tekst utenfor JSON):
 {{"items": [
@@ -274,6 +274,50 @@ Gi ett tydelig compliance-svar på spørsmålet i JSON-formatet som beskrevet.""
         "output_key": "findings",
     },
 }
+
+
+# ── Output language ───────────────────────────────────────────────────────────
+# Every prompt above is written in Norwegian. Rather than keep a translated copy
+# of each query type, the chosen language is appended as a directive to whichever
+# system prompt is in effect — that also covers user-edited prompts, which carry
+# no placeholder of their own.
+
+LANGUAGES = {
+    "no": ("norsk bokmål", "norsk bokmål"),
+    "nn": ("nynorsk",      "nynorsk"),
+    "en": ("engelsk",      "English"),
+    "sv": ("svensk",       "svenska"),
+    "da": ("dansk",        "dansk"),
+    "de": ("tysk",         "Deutsch"),
+    "fr": ("fransk",       "français"),
+    "es": ("spansk",       "español"),
+    "it": ("italiensk",    "italiano"),
+    "pl": ("polsk",        "polski"),
+    "ar": ("arabisk",      "العربية"),
+    "so": ("somali",       "Soomaali"),
+    "uk": ("ukrainsk",     "українська"),
+}
+
+DEFAULT_LANGUAGE = "no"
+
+# Appended verbatim, so it has to stay brace-free: callers add it *after*
+# .format() has run on the template, where a stray {} would no longer be escaped.
+# The INGEN RELEVANTE FUNN carve-out matters — extract_per_document tests for
+# that literal string, so a translated version would be read as a real finding.
+_LANGUAGE_DIRECTIVE = """
+
+SPRÅK: Skriv alt du produserer på %s.
+Dette gjelder både etiketter, overskrifter og brødtekst.
+Oversett ikke JSON-nøkler eller feltnavn — bare verdiene.
+Direkte sitater fra kildene kan beholdes på originalspråket, men din egen tekst skal være på %s.
+UNNTAK: svarer du at dokumentet ikke er relevant, skriv nøyaktig INGEN RELEVANTE FUNN — den setningen skal aldri oversettes."""
+
+
+def _language_directive(code: str) -> str:
+    """Instruction appended to a system prompt so the model writes in `code`."""
+    name, endonym = LANGUAGES.get(code or DEFAULT_LANGUAGE, LANGUAGES[DEFAULT_LANGUAGE])
+    label = name if name == endonym else "%s (%s)" % (name, endonym)
+    return _LANGUAGE_DIRECTIVE % (label, label)
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -297,6 +341,7 @@ class AggregateState(TypedDict):
     question: str
     query_type: str                     # "problems" | "moments" | "personas" | "free" | "strategisk_risiko"
     query_type_cfg: Any                 # effective (possibly user-edited) prompt config; falls back to QUERY_TYPES
+    language: str                       # LANGUAGES key; output language for extraction + syntese
     n_personas: int                     # only used for query_type="personas"
     include_aggregate: bool             # run cross-document syntese (default True)
     document_store_path: str
@@ -428,6 +473,8 @@ def extract_per_document(state: AggregateState) -> dict:
     cfg = state.get("query_type_cfg") or QUERY_TYPES.get(query_type, QUERY_TYPES["free"])
     # Empty question → drive the analysis from the system prompt alone.
     question = _resolve_question(state, cfg)
+    extract_system = cfg["extract_system"] + _language_directive(
+        state.get("language", DEFAULT_LANGUAGE))
 
     per_doc_findings: list[DocFindings] = []
     total_docs = len(state["documents"])
@@ -513,7 +560,7 @@ def extract_per_document(state: AggregateState) -> dict:
 
         try:
             response = llm.invoke([
-                SystemMessage(content=cfg["extract_system"]),
+                SystemMessage(content=extract_system),
                 HumanMessage(content=prompt),
             ])
             raw = (response.content or "").strip()
@@ -601,6 +648,7 @@ def aggregate_findings(state: AggregateState) -> dict:
     cfg = state.get("query_type_cfg") or QUERY_TYPES.get(query_type, QUERY_TYPES["free"])
     # Empty question → drive the analysis from the system prompt alone.
     question = _resolve_question(state, cfg)
+    language = state.get("language", DEFAULT_LANGUAGE)
     structured = bool(cfg.get("structured"))
     include_aggregate = state.get("include_aggregate", True)
 
@@ -671,7 +719,8 @@ def aggregate_findings(state: AggregateState) -> dict:
     parsed: dict = {}
     try:
         response = llm.invoke([
-            SystemMessage(content=cfg["aggregate_system"].format(n_personas=n_personas)),
+            SystemMessage(content=cfg["aggregate_system"].format(n_personas=n_personas)
+                                  + _language_directive(language)),
             HumanMessage(content=prompt),
         ])
         raw = (response.content or "").strip()

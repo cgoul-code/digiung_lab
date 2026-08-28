@@ -864,6 +864,9 @@ def _parse_aggregate_body(body):
         "index_name":    body.get("index_name", ""),
         # Cross-document syntese is opt-in; per-document analysis is always returned.
         "include_aggregate": bool(body.get("include_aggregate", True)),
+        # Output language for both extraction and syntese; unknown codes fall
+        # back to Norwegian inside _language_directive.
+        "language":      body.get("language") or "no",
     }
 
 

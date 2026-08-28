@@ -671,5 +671,85 @@
       "tittel": "Clarification on sponsorship of health professional and scientific meetings by companies that market foods for infants and young children",
       "type_kilde": "Informasjonsnotat"
     }
+  ],
+  "Who-koden-morsmelkerstatning": [
+    {
+      "tittel": "The International Code of Marketing of Breastmilk Substitutes: A guide for health workers",
+      "filnavn": "./data\\Who-koden-morsmelkerstatning\\UUK-2025-Guide-to-the-Code-HCW.pdf",
+      "publisert_arstall": 2025,
+      "publisert_av": "UNICEF UK Baby Friendly Initiative",
+      "type_kilde": "Veileder",
+      "malgruppe": "Helsearbeidere og tidligårsansatte som arbeider med familier, særlig de som implementerer Baby Friendly-standardene i Storbritannia",
+      "antall_deltakere": null,
+      "segment": "Spedbarnsernæring",
+      "oppsummering": "Dokumentet er en praktisk veileder om International Code of Marketing of Breastmilk Substitutes, rettet mot helsearbeidere og andre fagpersoner som arbeider med spedbarn og familier. Veilederen forklarer formålet med koden, relevante regelverk og hvordan markedsføring av morsmelkerstatning, tåteutstyr og beslektede produkter kan påvirke amming og informerte valg. Den beskriver også kommersielle påvirkningsformer, interessekonflikter og helsepersonells ansvar for å gi balansert og uavhengig informasjon. Guiden er oppdatert i 2025 for å reflektere dagens kommersielle landskap, inkludert digital markedsføring og sosiale medier.",
+      "kilde_url": "",
+      "kilde_type": ""
+    },
+    {
+      "tittel": "9241541601",
+      "filnavn": "./data\\Who-koden-morsmelkerstatning\\9241541601.pdf",
+      "publisert_arstall": null,
+      "publisert_av": "",
+      "type_kilde": "",
+      "malgruppe": "",
+      "antall_deltakere": null,
+      "segment": "",
+      "oppsummering": "",
+      "kilde_url": "",
+      "kilde_type": ""
+    },
+    {
+      "tittel": "Clarification on sponsorship of health professional and scientific meetings by companies that market foods for infants and young children",
+      "filnavn": "./data\\Who-koden-morsmelkerstatning\\9789240074422-eng.pdf",
+      "publisert_arstall": 2023,
+      "publisert_av": "World Health Organization",
+      "type_kilde": "Informasjonsnotat",
+      "malgruppe": "Helsepersonell, helseprofesjonelle foreninger, forskere, møtearrangører og myndigheter",
+      "antall_deltakere": null,
+      "segment": "Barn og ernæring",
+      "oppsummering": "Dokumentet er et informasjonsnotat fra WHO som presiserer hva som regnes som sponsing av faglige og vitenskapelige møter fra selskaper som markedsfører mat og drikke for spedbarn og småbarn, inkludert morsmelkerstatning og oppfølgingsmelk. Notatet bygger på WHO-veiledningen fra 2016 og understreker at slike selskaper ikke skal sponse møter for helsepersonell, og at helsepersonell, helsesystemer og profesjonsforeninger ikke skal akseptere slik støtte. Det forklarer at både økonomiske bidrag og naturalytelser kan skape interessekonflikter og påvirke faglige vurderinger, anbefalinger og pasientbehandling. Dokumentet gir konkrete eksempler på forbudt sponsing, som annonser, utstillingsplass, støtte til sesjoner, stipender, reisestøtte, servering og deling av deltakerlister. Hovedbudskapet er at profesjonelle og vitenskapelige arrangementer må holdes fri for kommersiell påvirkning fra denne industrien.",
+      "kilde_url": "",
+      "kilde_type": ""
+    },
+    {
+      "tittel": "Regulating the digital marketing of breast-milk substitutes",
+      "filnavn": "./data\\Who-koden-morsmelkerstatning\\B156_(30)-en.pdf",
+      "publisert_arstall": 2025,
+      "publisert_av": "Verdens helseorganisasjon (WHO) Executive Board",
+      "type_kilde": "Resolusjon",
+      "malgruppe": "Medlemsstater, sivilsamfunn og myndigheter som regulerer markedsføring av morsmelkerstatning og mat for sped- og småbarn",
+      "antall_deltakere": null,
+      "segment": "Barn og ernæring",
+      "oppsummering": "Dokumentet er en beslutning fra WHOs Executive Board om å anbefale en resolusjon til Verdens helseforsamling om regulering av digital markedsføring av morsmelkerstatning. Teksten understreker at digital markedsføring, inkludert influensermarkedsføring, kan undergrave amming og skade folkehelsen ved å påvirke gravide, foreldre, omsorgspersoner og helsepersonell. Medlemsstatene oppfordres til å utvikle og styrke bindende regulatoriske tiltak, overvåkingssystemer og tverrsektoriell myndighetskoordinering, samt å beskytte regelverksarbeidet mot interessekonflikter. WHO-direktøren bes også om å gi teknisk støtte, samle erfaringer fra land og rapportere tilbake om gjennomføringen innen 2028.",
+      "kilde_url": "",
+      "kilde_type": ""
+    },
+    {
+      "tittel": "Clarification on the classification of follow-up formulas for children 6-36 months as breastmilk substitutes",
+      "filnavn": "./data\\Who-koden-morsmelkerstatning\\WHO-NMH-NHD-18.11-eng.pdf",
+      "publisert_arstall": 2018,
+      "publisert_av": "World Health Organization",
+      "type_kilde": "Informasjonsnotat",
+      "malgruppe": "Beslutningstakere, helsemyndigheter og fagpersoner som arbeider med spedbarns- og småbarnsernæring",
+      "antall_deltakere": null,
+      "segment": "Barn og ernæring",
+      "oppsummering": "Dokumentet er et informasjonsnotat fra WHO som klargjør at oppfølgingsmelk for barn 6–36 måneder skal regnes som brystmelkerstatning etter den internasjonale koden for markedsføring av brystmelkerstatninger. Notatet begrunner dette med at fortsatt amming opp til to år eller lenger gir betydelige helsegevinster for både barn og mor, blant annet redusert dødelighet, bedre ernæring og lavere risiko for overvekt hos barn. WHO viser også til forskning som indikerer at slike melkeprodukter erstatter inntak av morsmelk snarere enn å komme i tillegg til den. Videre understrekes det at klassifiseringen avhenger av produktets funksjon og markedsføring, ikke av sammensetningen alene. Konklusjonen er at beskyttelsen av amming også må omfatte oppfølgingsmelk for barn under tre år.",
+      "kilde_url": "",
+      "kilde_type": ""
+    },
+    {
+      "tittel": "The International Code of Marketing of Breast-milk Substitutes: Frequently Asked Questions (2017 Update)",
+      "filnavn": "./data\\Who-koden-morsmelkerstatning\\WHO-NMH-NHD-17.1-eng.pdf",
+      "publisert_arstall": 2017,
+      "publisert_av": "World Health Organization",
+      "type_kilde": "Veileder",
+      "malgruppe": "Beslutningstakere, helsearbeidere, andre som arbeider med regelverket, samt allmennheten",
+      "antall_deltakere": null,
+      "segment": "Barn og ernæring",
+      "oppsummering": "Dokumentet er en spørsmål-og-svar-publikasjon fra WHO om den internasjonale koden for markedsføring av morsmelkerstatninger. Det forklarer hva koden er, hvorfor amming er viktig, hvilke produkter og markedsføringspraksiser som omfattes, og hvordan senere WHA-resolusjoner utdyper og styrker regelverket. Publikasjonen understreker at formålet er å beskytte og fremme amming og sikre trygg bruk av morsmelkerstatninger når det er nødvendig. Den beskriver også begrensninger på reklame, utdeling av prøver, påvirkning i helsetjenesten og krav til informasjon og merking. Dokumentet er laget som lett tilgjengelig informasjon for både fagpersoner og offentligheten.",
+      "kilde_url": "",
+      "kilde_type": ""
+    }
   ]
 }
