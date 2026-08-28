@@ -33,7 +33,7 @@ from urllib.parse import quote
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv())
 
-from quart import Quart, request, jsonify, Response
+from quart import Quart, request, jsonify, Response, send_file
 from quart_cors import cors
 
 from llama_index.core import (
@@ -1710,6 +1710,58 @@ def _effective_cfg(query_type: str) -> dict:
     return eff.get(query_type) or eff.get("free")
 
 
+@app.get("/admin/file")
+async def admin_get_file():
+    """Return a document stored for a bank, for viewing or downloading.
+
+    The path never comes from the caller: the entry is looked up by its key in
+    the bank, and the resolved file is required to sit inside DATA_DIR. A
+    crafted filnavn in the store therefore can't reach outside it either.
+    """
+    name = request.args.get("index_name", "")
+    key = request.args.get("key", "")
+    try:
+        _safe_index_name(name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not key:
+        return jsonify({"error": "Missing 'key' query param"}), 400
+
+    with _doc_store_lock:
+        data = _load_full_doc_store()
+        entries = list(data.get(name) or [])
+    entry = next((e for e in entries if _entry_admin_key(e) == key), None)
+    if entry is None:
+        return jsonify({"error": f"Fant ingen oppføring med nøkkel '{key}'"}), 404
+    if entry.get("url") and not entry.get("filnavn"):
+        # Nothing stored on our side — the source is the web page itself.
+        return jsonify({"error": "Denne oppføringen er en nettside, ikke en lagret fil.",
+                        "url": entry["url"]}), 409
+
+    from utils.create_lab_vectorindex.ingest_pdfs import _resolve_source_path
+    try:
+        path = _resolve_source_path(entry.get("filnavn", ""), data_dir=DATA_DIR, index_name=name)
+    except Exception as e:
+        logging.warning("Could not resolve %s: %s", entry.get("filnavn"), e)
+        return jsonify({"error": "Kunne ikke finne filen på serveren."}), 404
+
+    real = os.path.realpath(str(path))
+    root = os.path.realpath(DATA_DIR)
+    if not (real == root or real.startswith(root + os.sep)):
+        logging.error("Refusing to serve %s — outside DATA_DIR", real)
+        return jsonify({"error": "Filen ligger utenfor dokumentområdet."}), 403
+    if not os.path.isfile(real):
+        return jsonify({"error": "Filen finnes ikke på serveren lenger."}), 404
+
+    import mimetypes
+    filename = os.path.basename(real)
+    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    # Inline by default so a PDF opens in the browser; ?download=1 saves it.
+    as_attachment = str(request.args.get("download", "")).lower() in ("1", "true", "yes")
+    return await send_file(real, mimetype=mime, as_attachment=as_attachment,
+                           attachment_filename=filename)
+
+
 @app.get("/admin/reports")
 async def admin_list_all_reports():
     """List every unique report across all indexes, so a new index can be seeded
@@ -2336,6 +2388,82 @@ async def admin_list_entries():
         data = _load_full_doc_store()
         entries = list(data.get(name, []))
     return jsonify({"index_name": name, "entries": entries})
+
+
+@app.post("/admin/reindex/backfill-manifest")
+async def admin_backfill_manifest():
+    """Record documents the index already contains as ingested.
+
+    Only ever adds: an entry is marked ingested when the built index actually
+    holds nodes for it. Anything genuinely missing stays unbuilt, so this can't
+    hide real work by claiming something is done that isn't.
+    """
+    name = request.args.get("index_name", "")
+    try:
+        _safe_index_name(name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    persist_dir = os.path.join(INDEX_STORAGE, name)
+    if not os.path.isfile(os.path.join(persist_dir, "docstore.json")):
+        return jsonify({"error": f"«{name}» har ingen bygget indeks å lese fra."}), 404
+
+    with _doc_store_lock:
+        data = _load_full_doc_store()
+        entries = list(data.get(name) or [])
+    if not entries:
+        return jsonify({"error": f"«{name}» har ingen oppføringer."}), 404
+
+    def _work():
+        from utils.create_lab_vectorindex.ingest_pdfs import (
+            _entry_key, _resolve_source_path,
+            _load_processed_doc_ids, _save_processed_doc_ids,
+        )
+        ctx = StorageContext.from_defaults(persist_dir=persist_dir)
+        index = load_index_from_storage(ctx)
+        in_index = set(index.docstore.get_all_ref_doc_info() or {})
+
+        processed = _load_processed_doc_ids(INDEX_STORAGE, name)
+        before = len(processed)
+        matched, missing = [], []
+        for e in entries:
+            key = _entry_key(e)
+            # The manifest key and the id the nodes were tagged with agree on
+            # one platform but not always across them, so try both forms.
+            candidates = {key}
+            if e.get("url"):
+                candidates.add(e["url"])
+            elif e.get("filnavn"):
+                try:
+                    candidates.add(str(_resolve_source_path(
+                        e["filnavn"], data_dir=DATA_DIR, index_name=name)))
+                except Exception:
+                    pass
+                candidates.add(e["filnavn"])
+            if candidates & in_index:
+                processed.add(key)
+                matched.append(key)
+            else:
+                missing.append(key)
+
+        if len(processed) != before:
+            _save_processed_doc_ids(INDEX_STORAGE, name, processed)
+        return {
+            "in_index": len(in_index),
+            "entries": len(entries),
+            "recorded": len(matched),
+            "added": len(processed) - before,
+            "still_unbuilt": missing,
+        }
+
+    loop = asyncio.get_event_loop()
+    try:
+        out = await loop.run_in_executor(None, _work)
+    except Exception as e:
+        logging.error("Manifest backfill failed for %s: %s", name, e, exc_info=True)
+        return jsonify({"error": f"Kunne ikke lese indeksen: {e}"}), 500
+
+    return jsonify({"ok": True, "index_name": name, **out})
 
 
 @app.get("/admin/reindex/pending")
