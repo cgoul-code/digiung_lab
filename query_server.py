@@ -87,6 +87,8 @@ DOCUMENT_STORE_PATH = _doc_store_env or "./utils/create_lab_vectorindex/document
 # Editable per-query-type prompt overrides (persisted + mirrored to blob).
 PROMPTS_STORE_PATH = os.getenv("PROMPTS_STORE_PATH") or "./utils/create_lab_vectorindex/query_type_prompts.json"
 PROMPTS_BLOB_NAME = "query_type_prompts.json"
+CUSTOM_QT_STORE_PATH = os.getenv("CUSTOM_QT_STORE_PATH") or "./utils/create_lab_vectorindex/custom_query_types.json"
+CUSTOM_QT_BLOB_NAME = "custom_query_types.json"
 EDITABLE_PROMPT_FIELDS = ("extract_system", "extract_prompt", "aggregate_system", "aggregate_prompt")
 
 # Per-index list of enabled analysetyper (query types). Maps {index_name: [keys]}.
@@ -1540,6 +1542,109 @@ def _save_prompt_overrides(data: dict) -> None:
     azure_blob.upload_file(PROMPTS_STORE_PATH, PROMPTS_BLOB_NAME)
 
 
+# ── Custom analysetyper ───────────────────────────────────────────────────────
+# Types defined at runtime rather than compiled in. Stored whole, since there is
+# no built-in default for them to override.
+_custom_qt_lock = threading.Lock()
+
+CUSTOM_QT_TEXT_FIELDS = (
+    "label", "description", "default_question",
+    "extract_system", "extract_prompt", "aggregate_system", "aggregate_prompt",
+)
+# Without these the analysis has no instruction to run; the rest can be blank.
+CUSTOM_QT_REQUIRED = ("label", "extract_system", "aggregate_system")
+
+
+def _load_custom_query_types() -> dict:
+    if not os.path.isfile(CUSTOM_QT_STORE_PATH):
+        return {}
+    try:
+        with open(CUSTOM_QT_STORE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as e:
+        logging.warning("Could not read custom query types at %s: %s", CUSTOM_QT_STORE_PATH, e)
+        return {}
+
+
+def _save_custom_query_types(data: dict) -> None:
+    os.makedirs(os.path.dirname(CUSTOM_QT_STORE_PATH), exist_ok=True)
+    tmp = CUSTOM_QT_STORE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, CUSTOM_QT_STORE_PATH)
+    azure_blob.upload_file(CUSTOM_QT_STORE_PATH, CUSTOM_QT_BLOB_NAME)
+
+
+def _check_aggregate_prompt(text: str) -> None:
+    """aggregate_system is .format()-ed at run time, so every literal brace must
+    be doubled. Catch it here rather than as a KeyError after the per-document
+    pass has already run."""
+    try:
+        (text or "").format(n_personas=1)
+    except (KeyError, IndexError, ValueError) as e:
+        raise ValueError(
+            "Instruksjonen for oppsummeringen inneholder klammeparenteser som ikke "
+            f"kan tolkes ({e}). JSON-eksempler må ha doble klammer: "
+            '{{"items": [...]}} i stedet for {"items": [...]}.'
+        )
+
+
+_SUGGEST_QT_SYSTEM = (
+    "Du hjelper til med å sette opp en ny analysemal for et verktøy som leser "
+    "mange dokumenter og oppsummerer funn på tvers.\n\n"
+    "Analysen skjer i to steg, og du skal skrive systeminstruksjonen for begge:\n"
+    "1) «extract_system» — leser ETT dokument om gangen og trekker ut det som er "
+    "relevant. Den skal be om en punktliste på norsk, ett konkret funn per punkt, "
+    "og avslutte med: Hvis dokumentet ikke er relevant, svar: INGEN RELEVANTE FUNN.\n"
+    "2) «aggregate_system» — får punktlistene fra alle dokumentene og slår dem "
+    "sammen. Den MÅ kreve svar i nøyaktig dette formatet, med doble klammer:\n"
+    '{{"items": [{{"label": "Kort navn", "description": "1-2 setninger", '
+    '"sources": ["Dokumenttittel"]}}]}}\n\n'
+    "Skriv instruksjonene på norsk, i imperativ, rettet mot modellen. Hold hver "
+    "på 3-6 linjer. Ikke bruk andre klammeparenteser enn de i formatet over.\n\n"
+    "Svar KUN med JSON:\n"
+    '{{"extract_system": "...", "aggregate_system": "...", "default_question": "..."}}\n'
+    "der default_question er et naturlig spørsmål malen kan kjøres med."
+)
+
+
+def _suggest_query_type(label: str, description: str) -> dict:
+    from langchain_core.messages import SystemMessage, HumanMessage
+    from aggregate_workflow import _parse_json_block
+
+    prompt = (
+        f"Navn på analysemalen: {label}\n"
+        f"Beskrivelse av hva den skal finne: {description}\n\n"
+        "Returner JSON-objektet med instruksjonene."
+    )
+    response = _extract_llm.invoke([
+        SystemMessage(content=_SUGGEST_QT_SYSTEM),
+        HumanMessage(content=prompt),
+    ])
+    parsed = _parse_json_block(response.content or "") or {}
+    out = {}
+    for k in ("extract_system", "aggregate_system", "default_question"):
+        v = parsed.get(k)
+        out[k] = v.strip() if isinstance(v, str) else ""
+    if not out["extract_system"] or not out["aggregate_system"]:
+        raise ValueError("Modellen returnerte ikke begge instruksjonene.")
+    # The model is told to double its braces; make sure it actually did before
+    # this text becomes a template someone runs.
+    _check_aggregate_prompt(out["aggregate_system"])
+    return out
+
+
+def _safe_qt_key(key: str) -> str:
+    if not key or not re.fullmatch(r"[a-z0-9_]{2,40}", key):
+        raise ValueError(
+            f"Ugyldig nøkkel: {key!r}. Bruk 2-40 tegn: små bokstaver, tall og understrek."
+        )
+    if key in QUERY_TYPES:
+        raise ValueError(f"«{key}» er en innebygd analysetype og kan ikke overskrives.")
+    return key
+
+
 # ── Per-index analysetyper (which query types an index exposes) ───────────────
 _index_qt_lock = threading.Lock()
 
@@ -1585,6 +1690,17 @@ def _effective_query_types() -> dict:
             v = ov.get(field)
             if isinstance(v, str) and v.strip():
                 merged[field] = v
+        effective[qt] = merged
+
+    # Custom types last, and never over a built-in: a stored key that shadowed
+    # one would silently change an analysis people rely on.
+    for qt, cfg in (_load_custom_query_types() or {}).items():
+        if qt in effective or not isinstance(cfg, dict):
+            continue
+        merged = dict(cfg)
+        merged["output_key"] = "findings"   # the generic finding shape
+        merged["custom"] = True
+        merged.setdefault("default_question", "")
         effective[qt] = merged
     return effective
 
@@ -1858,6 +1974,53 @@ async def admin_index_query_types():
         return jsonify(_load_index_query_types())
 
 
+@app.put("/admin/index-query-types/<index_name>")
+async def admin_set_index_query_types(index_name):
+    """Set which analysetyper a bank offers.
+
+    An empty list clears the entry, which puts the bank back on each type's own
+    default rule — that is a real state, not an error, so it is how you undo a
+    pinned selection."""
+    try:
+        _safe_index_name(index_name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    with _doc_store_lock:
+        known = _load_full_doc_store()
+    if index_name not in known:
+        return jsonify({"error": f"Ukjent dokumentbank: {index_name}"}), 404
+
+    body = await request.get_json(force=True) or {}
+    raw = body.get("query_types")
+    if not isinstance(raw, list):
+        return jsonify({"error": "Forventet 'query_types' som liste"}), 400
+
+    # Drop anything that no longer exists rather than pinning a dead key.
+    available = set(_effective_query_types().keys())
+    keys, unknown = [], []
+    for k in raw:
+        if not isinstance(k, str):
+            continue
+        if k in available:
+            if k not in keys:
+                keys.append(k)
+        else:
+            unknown.append(k)
+
+    with _index_qt_lock:
+        qt_map = _load_index_query_types()
+        if keys:
+            qt_map[index_name] = keys
+        else:
+            qt_map.pop(index_name, None)
+        _save_index_query_types(qt_map)
+
+    return jsonify({"ok": True, "index_name": index_name,
+                    "query_types": keys, "ignored": unknown,
+                    "using_defaults": not keys})
+
+
 @app.post("/admin/indexes")
 async def admin_create_index():
     """Create a new index in document_store.json. `name` is required (query or body).
@@ -1992,13 +2155,125 @@ async def admin_delete_index():
     return jsonify({"ok": True, "name": name, "removed": removed})
 
 
+@app.get("/admin/query-types")
+async def admin_list_query_types():
+    """Every analysetype with its effective text, and whether it can be deleted.
+
+    Labels for the built-ins live in the client, so they are reported as-is and
+    only custom types carry one here."""
+    eff = _effective_query_types()
+    out = []
+    for qt, cfg in eff.items():
+        out.append({
+            "key":              qt,
+            "custom":           bool(cfg.get("custom")),
+            "label":            cfg.get("label") or "",
+            "description":      cfg.get("description") or "",
+            "default_question": cfg.get("default_question") or "",
+            "extract_system":   cfg.get("extract_system") or "",
+            "aggregate_system": cfg.get("aggregate_system") or "",
+        })
+    out.sort(key=lambda r: (r["custom"], r["key"]))
+    return jsonify({"query_types": out})
+
+
+@app.post("/admin/query-types/suggest")
+async def admin_suggest_query_type():
+    """Draft both instructions from a name and a description, so a template can
+    be started from what it should find rather than from a blank box."""
+    body = await request.get_json(force=True) or {}
+    label = (body.get("label") or "").strip()
+    description = (body.get("description") or "").strip()
+    if not description:
+        return jsonify({"error": "Skriv en beskrivelse først — den er grunnlaget for forslaget."}), 400
+
+    loop = asyncio.get_event_loop()
+    try:
+        out = await loop.run_in_executor(None, _suggest_query_type, label, description)
+    except Exception as e:
+        logging.warning("Prompt suggestion failed for %r: %s", label, e, exc_info=True)
+        return jsonify({"error": f"Kunne ikke foreslå instruksjoner: {e}"}), 502
+    return jsonify({"ok": True, **out})
+
+
+@app.post("/admin/query-types")
+async def admin_create_query_type():
+    """Create an analysetype. `copy_from` seeds the prompts from an existing one,
+    so a new type can start from something that already works."""
+    body = await request.get_json(force=True) or {}
+    try:
+        key = _safe_qt_key((body.get("key") or "").strip().lower())
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    with _custom_qt_lock:
+        custom = _load_custom_query_types()
+        if key in custom:
+            return jsonify({"error": f"Analysetypen «{key}» finnes allerede."}), 409
+
+        cfg = {}
+        source = (body.get("copy_from") or "").strip()
+        if source:
+            base = _effective_query_types().get(source)
+            if not base:
+                return jsonify({"error": f"Ukjent analysetype å kopiere fra: {source}"}), 400
+            for f in CUSTOM_QT_TEXT_FIELDS:
+                cfg[f] = base.get(f) or ""
+
+        for f in CUSTOM_QT_TEXT_FIELDS:
+            v = body.get(f)
+            if isinstance(v, str) and v.strip():
+                cfg[f] = v
+
+        missing = [f for f in CUSTOM_QT_REQUIRED if not (cfg.get(f) or "").strip()]
+        if missing:
+            return jsonify({"error": f"Mangler: {', '.join(missing)}"}), 400
+        try:
+            _check_aggregate_prompt(cfg.get("aggregate_system"))
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
+        # The data templates are plumbing, not instruction — fall back to the
+        # free analysis ones so a new type never ships without placeholders.
+        for f in ("extract_prompt", "aggregate_prompt"):
+            if not (cfg.get(f) or "").strip():
+                cfg[f] = QUERY_TYPES["free"][f]
+
+        custom[key] = cfg
+        _save_custom_query_types(custom)
+
+    return jsonify({"ok": True, "key": key, "query_type": cfg})
+
+
 @app.put("/admin/query-types/<qt>")
 async def admin_update_query_type(qt):
     """Save edited prompt text for a query type. Only fields that differ from the
-    built-in default are persisted; an empty/default value clears that override."""
-    if qt not in QUERY_TYPES:
-        return jsonify({"error": f"Unknown query_type: {qt}"}), 404
+    built-in default are persisted; an empty/default value clears that override.
+
+    Custom types have no built-in to differ from, so they are written whole."""
     body = await request.get_json(force=True) or {}
+
+    if qt not in QUERY_TYPES:
+        with _custom_qt_lock:
+            custom = _load_custom_query_types()
+            if qt not in custom:
+                return jsonify({"error": f"Unknown query_type: {qt}"}), 404
+            cfg = dict(custom[qt])
+            for f in CUSTOM_QT_TEXT_FIELDS:
+                v = body.get(f)
+                if isinstance(v, str):
+                    cfg[f] = v
+            missing = [f for f in CUSTOM_QT_REQUIRED if not (cfg.get(f) or "").strip()]
+            if missing:
+                return jsonify({"error": f"Mangler: {', '.join(missing)}"}), 400
+            try:
+                _check_aggregate_prompt(cfg.get("aggregate_system"))
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            custom[qt] = cfg
+            _save_custom_query_types(custom)
+        return jsonify({"ok": True, "query_type": qt, "effective": _effective_cfg(qt)})
+
     incoming = {k: body[k] for k in EDITABLE_PROMPT_FIELDS if isinstance(body.get(k), str)}
     if not incoming:
         return jsonify({"error": "No editable prompt fields in body"}), 400
@@ -2024,7 +2299,25 @@ async def admin_update_query_type(qt):
 async def admin_reset_query_type(qt):
     """Reset a query type's prompts to the built-in defaults."""
     if qt not in QUERY_TYPES:
-        return jsonify({"error": f"Unknown query_type: {qt}"}), 404
+        # Custom types have no default to fall back to — deleting means removing.
+        with _custom_qt_lock:
+            custom = _load_custom_query_types()
+            if qt not in custom:
+                return jsonify({"error": f"Unknown query_type: {qt}"}), 404
+            custom.pop(qt, None)
+            _save_custom_query_types(custom)
+        # Drop it from any index that pinned it, or those indexes would offer a
+        # type that no longer exists.
+        with _index_qt_lock:
+            qt_map = _load_index_query_types()
+            changed = False
+            for name, keys in list(qt_map.items()):
+                if qt in (keys or []):
+                    qt_map[name] = [k for k in keys if k != qt]
+                    changed = True
+            if changed:
+                _save_index_query_types(qt_map)
+        return jsonify({"ok": True, "query_type": qt, "deleted": True})
     with _prompts_lock:
         data = _load_prompt_overrides()
         existed = data.pop(qt, None) is not None

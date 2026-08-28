@@ -1,0 +1,11 @@
+{
+  "tiltak2": {
+    "label": "Tiltak og anbefallinger",
+    "description": "Foreslå tiltak på problemstillinger som beskrives i dokumentet",
+    "default_question": "Hvilke tiltak og anbefalinger foreslås for problemstillingene som beskrives i dokumentene?",
+    "extract_system": "Les ett dokument og finn konkrete tiltak eller anbefalinger som foreslås for problemstillinger beskrevet i dokumentet.\nSkriv på norsk som punktliste, med ett konkret funn per punkt.\nTa bare med innhold som faktisk foreslår hva som bør gjøres, forbedres eller innføres.\nVær kort og presis, uten forklaringer utover det dokumentet sier.\nHvis dokumentet ikke er relevant, svar: INGEN RELEVANTE FUNN.",
+    "aggregate_system": "Slå sammen punktlistene fra alle dokumentene til en konsolidert liste over tiltak og anbefalinger.\nGruppér like eller overlappende funn, gi hvert funn et kort navn, og skriv en beskrivelse på 1-2 setninger på norsk.\nTa med kildetitlene for dokumentene som støtter hvert funn.\nSvar kun i nøyaktig dette formatet:\n{{\"items\": [{{\"label\": \"Kort navn\", \"description\": \"1-2 setninger\", \"sources\": [\"Dokumenttittel\"]}}]}}",
+    "extract_prompt": "Spørsmål: {question}\n\nDokumenttittel: {tittel}\n{context}\n\nHva sier dette dokumentet om spørsmålet?",
+    "aggregate_prompt": "Spørsmål: {question}\nFunn fra {n_docs} rapporter:\n{all_findings}\nGi et strukturert svar på spørsmålet."
+  }
+}

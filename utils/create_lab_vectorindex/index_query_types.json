@@ -1,6 +1,16 @@
 {
-  "Test_strategi_3": [
+  "Test_strategi": [
     "free",
-    "strategisk_risiko"
+    "strategisk_risiko",
+    "tiltak2"
+  ],
+  "Test2_strategisk_risiko": [
+    "free"
+  ],
+  "DigiUng_lab": [
+    "problems",
+    "moments",
+    "personas",
+    "free"
   ]
 }
