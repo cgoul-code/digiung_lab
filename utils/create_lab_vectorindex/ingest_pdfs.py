@@ -592,7 +592,11 @@ def run_incremental_ingest(
 
         The order matters: a manifest written before the persist would, after a
         crash, claim documents the index never received — and they would then be
-        skipped forever."""
+        skipped forever.
+
+        This is a durability checkpoint, not progress. Progress is reported as
+        each document is read and embedded, which is where the time actually
+        goes; batching that reporting made the bar jump in tens."""
         if not pending or index is None:
             return
         os.makedirs(persist_dir, exist_ok=True)
@@ -601,9 +605,8 @@ def run_incremental_ingest(
             processed.add(item["key"])
         _save_processed_doc_ids(storage, name, processed)
         logging.info("  ✓ Persisted %d document(s)", len(pending))
-        for item in pending:
-            _emit({"event": "doc_done", "index": item["index"], "total": total,
-                   "key": item["key"], "tittel": item["tittel"]})
+        _emit({"event": "saved", "count": len(pending), "total": total,
+               "message": f"Lagret {len(pending)} dokument(er)"})
         pending.clear()
 
     for idx, entry in enumerate(entries):
@@ -623,6 +626,8 @@ def run_incremental_ingest(
             index = _insert_documents(index, pages)
             pending.append({"key": key, "tittel": tittel, "index": idx})
             new_count += 1
+            logging.info("  ✓ Done")
+            _emit({"event": "doc_done", "index": idx, "total": total, "key": key, "tittel": tittel})
             if len(pending) >= PERSIST_EVERY:
                 _flush()
         except requests.HTTPError as e:
