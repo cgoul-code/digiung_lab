@@ -20,6 +20,8 @@ Graph:
 import json
 import logging
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
 from typing import Any, Optional
 
 from typing_extensions import TypedDict
@@ -33,6 +35,12 @@ from llama_index.core.vector_stores import (
     FilterOperator,
 )
 from langgraph.graph import StateGraph, START, END
+
+
+# How many per-document extractions to run at once. Each is one blocking LLM
+# call, so this is the main speed lever for an analysis — capped to stay under
+# Azure OpenAI rate limits. Override with AGGREGATE_EXTRACT_CONCURRENCY.
+EXTRACT_CONCURRENCY = max(1, int(os.getenv("AGGREGATE_EXTRACT_CONCURRENCY", "5")))
 
 
 # ── Query type registry ───────────────────────────────────────────────────────
@@ -136,7 +144,7 @@ Lag {n_personas} personas basert på disse mønstrene.""",
     },
 
     "free": {
-        "extract_system": """Du er en faglig assistent som analyserer forskningsrapporter om barn og unge i Norge.
+        "extract_system": """Du er en faglig assistent som analyserer dokumenter.
 Svar på spørsmålet du får, basert på innholdet i dokumentet.
 Svar med en kort punktliste med de viktigste funnene relatert til spørsmålet.
 Hvis dokumentet ikke er relevant, svar: INGEN RELEVANTE FUNN.""",
@@ -487,17 +495,20 @@ def extract_per_document(state: AggregateState) -> dict:
     })
 
     cancel_event = state.get("cancel_event")
-    for doc_idx, entry in enumerate(state["documents"]):
+    # Per-document extraction is independent work, each dominated by one blocking
+    # LLM call, so it runs concurrently rather than one document at a time.
+    # Bounded to stay under Azure OpenAI rate limits (see EXTRACT_CONCURRENCY).
+    max_workers = max(1, min(EXTRACT_CONCURRENCY, total_docs or 1))
+    done_count = [0]                 # docs finished — drives the progress counter
+    done_lock = threading.Lock()
+
+    def _process_doc(doc_idx: int, entry: dict):
+        """Extract findings from one document → (doc_idx, DocFindings | None).
+        Runs in a worker thread; _emit is thread-safe via the SSE QueueProxy."""
+        # A doc that starts after cancellation was requested does no work.
         if cancel_event is not None and cancel_event.is_set():
-            logging.info("[aggregate] Cancellation requested — stopping after %d/%d docs",
-                         doc_idx, total_docs)
-            _emit(state, {
-                "event":   "cancelled",
-                "message": f"Avbrutt etter {doc_idx}/{total_docs} dokumenter",
-                "index":   doc_idx,
-                "total":   total_docs,
-            })
-            break
+            return doc_idx, None
+
         if entry.get("url"):
             # URL-ingested entries store the URL as `filename` in chunk metadata
             filename = entry["url"]
@@ -530,7 +541,7 @@ def extract_per_document(state: AggregateState) -> dict:
 
         if not nodes:
             print(f"  ↳ No chunks found — skipping", flush=True)
-            continue
+            return doc_idx, None
 
         chunks = []
         context_parts = []
@@ -548,7 +559,7 @@ def extract_per_document(state: AggregateState) -> dict:
 
         if not context:
             print(f"  ↳ Chunks were empty — skipping", flush=True)
-            continue
+            return doc_idx, None
 
         print(f"  ↳ Context length: {len(context)} chars — calling LLM…", flush=True)
 
@@ -568,7 +579,7 @@ def extract_per_document(state: AggregateState) -> dict:
         except Exception as e:
             print(f"  ↳ LLM ERROR: {e}", flush=True)
             logging.warning("[aggregate] LLM failed for: %s", filename, exc_info=True)
-            continue
+            return doc_idx, None
 
         structured = None
         if cfg.get("structured"):
@@ -577,10 +588,10 @@ def extract_per_document(state: AggregateState) -> dict:
             except Exception as e:
                 print(f"  ↳ JSON parse error: {e}", flush=True)
                 logging.warning("[aggregate] structured parse failed for %s", filename, exc_info=True)
-                continue
+                return doc_idx, None
             if not structured or structured.get("relevant") is False:
                 print(f"  ↳ Not relevant — skipping", flush=True)
-                continue
+                return doc_idx, None
             # Flat list (risks first, else kildefunn) for backward-compatible summaries.
             findings = list(structured.get("risikoer") or []) or list(structured.get("kildefunn") or [])
             has_content = any(
@@ -590,7 +601,7 @@ def extract_per_document(state: AggregateState) -> dict:
         else:
             if "INGEN RELEVANTE FUNN" in raw.upper():
                 print(f"  ↳ No relevant findings", flush=True)
-                continue
+                return doc_idx, None
 
             findings = [
                 line.lstrip("-•* ").strip()
@@ -604,9 +615,15 @@ def extract_per_document(state: AggregateState) -> dict:
 
         n_findings = len(findings) if findings else 0
         print(f"  ↳ {n_findings} finding(s) extracted", flush=True)
+        # Monotonic progress count — completions arrive out of order under
+        # concurrency, so the running total, not doc_idx, is what advances.
+        with done_lock:
+            done_count[0] += 1
+            completed = done_count[0]
         _emit(state, {
             "event":      "doc_done",
             "index":      doc_idx,
+            "completed":  completed,
             "total":      total_docs,
             "tittel":     tittel,
             "filename":   filename,
@@ -619,7 +636,8 @@ def extract_per_document(state: AggregateState) -> dict:
                 ar_int = int(ar) if ar not in (None, "") else None
             except (TypeError, ValueError):
                 ar_int = None
-            per_doc_findings.append(DocFindings(
+            logging.info("[aggregate] findings from: %s", tittel)
+            return doc_idx, DocFindings(
                 tittel=tittel,
                 filename=filename,
                 kilde_url=(entry.get("kilde_url") or ""),
@@ -629,8 +647,40 @@ def extract_per_document(state: AggregateState) -> dict:
                 findings=findings,
                 structured=structured,
                 chunks=chunks,
-            ))
-            logging.info("[aggregate] findings from: %s", tittel)
+            )
+        return doc_idx, None
+
+    # Keep results keyed by index so the output stays in document order regardless
+    # of the order tasks finish in.
+    results: dict[int, DocFindings] = {}
+    cancelled = False
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_process_doc, doc_idx, entry): doc_idx
+            for doc_idx, entry in enumerate(state["documents"])
+        }
+        for fut in as_completed(futures):
+            if cancel_event is not None and cancel_event.is_set() and not cancelled:
+                cancelled = True
+                # Not-yet-started docs are cancelled; in-flight ones run to the end.
+                for pending in futures:
+                    pending.cancel()
+                logging.info("[aggregate] Cancellation requested — stopping after %d/%d docs",
+                             done_count[0], total_docs)
+                _emit(state, {
+                    "event":   "cancelled",
+                    "message": f"Avbrutt etter {done_count[0]}/{total_docs} dokumenter",
+                    "index":   done_count[0],
+                    "total":   total_docs,
+                })
+            try:
+                doc_idx, df = fut.result()
+            except CancelledError:
+                continue
+            if df is not None:
+                results[doc_idx] = df
+
+    per_doc_findings = [results[i] for i in sorted(results)]
 
     logging.info("[aggregate] %d/%d docs had findings",
                  len(per_doc_findings), len(state["documents"]))
