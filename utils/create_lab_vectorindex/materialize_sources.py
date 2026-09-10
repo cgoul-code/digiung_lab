@@ -66,6 +66,11 @@ from utils.create_lab_vectorindex.ingest_pdfs import (
     _SPA_PAGE_CACHE,  # noqa: F401  (kept warm across SPA fetches)
 )
 
+import net_guard  # SSRF guard for server-side URL fetches
+
+# Cap a single materialized download so one URL can't exhaust memory.
+_MAX_FETCH_BYTES = int(os.getenv("MATERIALIZE_MAX_BYTES", str(100 * 1024 * 1024)))
+
 # Optional blob sync — only active when azure_blob.ENABLED (USE_BLOB_INDEXES / IN_AZURE).
 try:
     import azure_blob
@@ -138,7 +143,9 @@ def _fetch_as_pdf(url: str) -> tuple[bytes, str, str]:
         blocks = [b for b in body.split("\n\n") if b.strip()]
         return _html_to_pdf_bytes(title, blocks), "html", title
 
-    resp = requests.get(url, timeout=60, headers=_BROWSER_HEADERS)
+    # SSRF-guarded: validates target + redirect hops, caps the body size.
+    resp = net_guard.safe_get(url, headers=_BROWSER_HEADERS, timeout=60,
+                              max_bytes=_MAX_FETCH_BYTES)
     resp.raise_for_status()
 
     content_type = (resp.headers.get("Content-Type") or "").lower()

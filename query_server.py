@@ -56,6 +56,7 @@ from llama_index.llms.azure_openai import AzureOpenAI
 from langchain_openai import AzureChatOpenAI
 from aggregate_workflow import aggregate_graph, QUERY_TYPES
 import azure_blob
+import net_guard
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,6 +81,35 @@ DATA_DIR          = ("." if RunningLocally() else "") + os.getenv("DATA_DIR",   
 SIMILARITY_TOP_K  = int(os.getenv("SIMILARITY_TOP_K",   "5"))
 SIMILARITY_CUTOFF = float(os.getenv("SIMILARITY_CUTOFF", "0.3"))
 
+# ── Security limits ───────────────────────────────────────────────────────────
+# Cap request bodies (uploads) and server-side URL fetches so a single request
+# can't exhaust memory/disk. Tunable via env for unusually large documents.
+MAX_UPLOAD_BYTES      = int(os.getenv("MAX_UPLOAD_BYTES",      str(100 * 1024 * 1024)))  # 100 MB
+FETCH_URL_MAX_BYTES   = int(os.getenv("FETCH_URL_MAX_BYTES",   str(100 * 1024 * 1024)))  # 100 MB
+# Document types the ingest pipeline can actually read; anything else is rejected
+# at upload time rather than stored and failing silently later.
+ALLOWED_UPLOAD_EXTS   = {".pdf", ".pptx", ".ppt", ".docx"}
+
+# Browser origins allowed to call this API (CORS). Defaults to the two deployed
+# clients; override with a comma-separated CORS_ALLOWED_ORIGINS (e.g. to add a
+# local dev origin such as http://localhost:5173). Exact match — no trailing slash.
+_DEFAULT_CORS_ORIGINS = (
+    "https://witty-beach-06ba13e03.7.azurestaticapps.net,"
+    "https://black-grass-09a92f203.7.azurestaticapps.net"
+)
+CORS_ALLOWED_ORIGINS = [
+    o.strip().rstrip("/")
+    for o in os.getenv("CORS_ALLOWED_ORIGINS", _DEFAULT_CORS_ORIGINS).split(",")
+    if o.strip()
+]
+# In local dev the SPA runs on a localhost origin (e.g. Vite on :5173) and calls
+# this server cross-origin, so allow any localhost/127.0.0.1 port there. Never
+# added in Azure — production stays limited to the deployed clients above.
+if _LOCAL:
+    CORS_ALLOWED_ORIGINS = CORS_ALLOWED_ORIGINS + [
+        re.compile(r"^http://(localhost|127\.0\.0\.1)(:\d+)?$")
+    ]
+
 # Fallback document store used when an index has no local document_store.json
 _doc_store_env = os.getenv("DOCUMENT_STORE_PATH")
 DOCUMENT_STORE_PATH = _doc_store_env or "./utils/create_lab_vectorindex/document_store.json"
@@ -95,6 +125,8 @@ EDITABLE_PROMPT_FIELDS = ("extract_system", "extract_prompt", "aggregate_system"
 # An index without an entry falls back to the client's built-in defaults.
 INDEX_QT_STORE_PATH = os.getenv("INDEX_QT_STORE_PATH") or "./utils/create_lab_vectorindex/index_query_types.json"
 INDEX_QT_BLOB_NAME = "index_query_types.json"
+EXAMPLES_STORE_PATH = os.getenv("EXAMPLES_STORE_PATH") or "./utils/create_lab_vectorindex/example_questions.json"
+EXAMPLES_BLOB_NAME = "example_questions.json"
 
 print(f"[config] LOCAL={_LOCAL}", flush=True)
 print(f"[config] INDEX_STORAGE={INDEX_STORAGE}", flush=True)
@@ -156,7 +188,9 @@ _aggregate_llm = AzureChatOpenAI(
 # ── App setup ─────────────────────────────────────────────────────────────────
 
 app = Quart(__name__)
-app = cors(app, allow_origin="*")
+app = cors(app, allow_origin=CORS_ALLOWED_ORIGINS)
+# Reject oversized request bodies before they're buffered (uploads, JSON).
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 
 # name -> {"index": VectorStoreIndex, "doc_store_path": str}
 _indexes: dict[str, dict] = {}
@@ -812,7 +846,7 @@ async def query():
         answer, nodes_with_scores = await loop.run_in_executor(None, _run_query)
     except Exception as e:
         logging.error("Query failed: %s", e, exc_info=True)
-        return jsonify({"error": "Query failed", "detail": str(e)}), 500
+        return jsonify({"error": "Query failed"}), 500
 
     # ── Build sources ─────────────────────────────────────────────────────────
     sources = []
@@ -1464,6 +1498,29 @@ def _safe_filename(name: str) -> str:
     return base
 
 
+def _check_upload_ext(fname: str) -> None:
+    """Reject upload filenames whose extension the ingest pipeline can't read."""
+    ext = os.path.splitext(fname)[1].lower()
+    if ext not in ALLOWED_UPLOAD_EXTS:
+        raise ValueError(
+            f"Filtypen '{ext or '(ingen)'}' støttes ikke. "
+            f"Tillatte typer: {', '.join(sorted(ALLOWED_UPLOAD_EXTS))}."
+        )
+
+
+def _validate_json_filnavn(filnavn: str) -> None:
+    """A JSON-supplied `filnavn` must resolve to a path inside DATA_DIR — otherwise
+    a crafted entry could point ingest/metadata reads at an arbitrary server file
+    (LFI). Absolute paths outside DATA_DIR and traversal are rejected. Any index's
+    subdirectory under DATA_DIR is allowed, so cross-index seeding still works."""
+    if not filnavn:
+        return
+    root = os.path.realpath(DATA_DIR)
+    real = os.path.realpath(filnavn if os.path.isabs(filnavn) else os.path.join(root, filnavn))
+    if not (real == root or real.startswith(root + os.sep)):
+        raise ValueError("Ugyldig 'filnavn' — må ligge i dokumentområdet (DATA_DIR).")
+
+
 def _files_dir_for(index_name: str) -> str:
     return os.path.join(DATA_DIR, _safe_index_name(index_name))
 
@@ -1652,6 +1709,37 @@ def _safe_qt_key(key: str) -> str:
 _index_qt_lock = threading.Lock()
 
 
+# ── Example questions per bank ────────────────────────────────────────────────
+# The suggestions offered on an empty analysis screen. Stored as
+# { index_name: [question, ...] }; a bank without an entry falls back to the
+# client's generic set.
+_examples_lock = threading.Lock()
+
+MAX_EXAMPLES = 8
+MAX_EXAMPLE_LEN = 300
+
+
+def _load_example_questions() -> dict:
+    if not os.path.isfile(EXAMPLES_STORE_PATH):
+        return {}
+    try:
+        with open(EXAMPLES_STORE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as e:
+        logging.warning("Could not read example questions at %s: %s", EXAMPLES_STORE_PATH, e)
+        return {}
+
+
+def _save_example_questions(data: dict) -> None:
+    os.makedirs(os.path.dirname(EXAMPLES_STORE_PATH), exist_ok=True)
+    tmp = EXAMPLES_STORE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, EXAMPLES_STORE_PATH)
+    azure_blob.upload_file(EXAMPLES_STORE_PATH, EXAMPLES_BLOB_NAME)
+
+
 def _load_index_query_types() -> dict:
     if not os.path.isfile(INDEX_QT_STORE_PATH):
         return {}
@@ -1812,22 +1900,29 @@ async def admin_fetch_url():
     from utils.create_lab_vectorindex.fetch_url_to_index import _BROWSER_HEADERS, _derive_filename
 
     def _download():
-        r = requests.get(url, headers=_BROWSER_HEADERS, timeout=120)
+        # SSRF-guarded: rejects internal/metadata targets, validates each redirect
+        # hop, and caps the response size.
+        r = net_guard.safe_get(url, headers=_BROWSER_HEADERS, timeout=120,
+                               max_bytes=FETCH_URL_MAX_BYTES)
         r.raise_for_status()
         return r.content, (r.headers.get("Content-Type") or "").lower()
 
     loop = asyncio.get_event_loop()
     try:
         content, content_type = await loop.run_in_executor(None, _download)
+    except net_guard.SSRFError as e:
+        # Blocked target or oversized body — a bad request, not an upstream failure.
+        return jsonify({"error": str(e)}), 400
     except requests.HTTPError as e:
         # Upstream refused us (typically WAF 401/403/429). The browser can't fetch
         # it either, so flag it so the UI can surface the manual download steps.
         status = getattr(e.response, "status_code", 0) or 0
         blocked = status in (401, 403, 429)
-        return jsonify({"error": f"Nedlasting feilet: {e}", "blocked": blocked,
+        return jsonify({"error": "Nedlasting feilet.", "blocked": blocked,
                         "upstream_status": status}), (403 if blocked else 502)
     except Exception as e:  # connection/timeout/invalid URL etc.
-        return jsonify({"error": f"Nedlasting feilet: {e}"}), 502
+        logging.warning("[/admin/fetch-url] download failed for %r: %s", url, e)
+        return jsonify({"error": "Nedlasting feilet."}), 502
 
     fname = _derive_filename(url, content_type)
     if not fname.lower().endswith((".pdf", ".pptx", ".ppt")):
@@ -2019,6 +2114,56 @@ async def admin_derive_metadata():
             pass
 
     return jsonify({"ok": True, "metadata": meta})
+
+
+@app.get("/admin/example-questions")
+async def admin_example_questions():
+    """Per-bank example questions as {index_name: [question, ...]}.
+    Banks without an entry use the client's generic set."""
+    with _examples_lock:
+        return jsonify(_load_example_questions())
+
+
+@app.put("/admin/example-questions/<index_name>")
+async def admin_set_example_questions(index_name):
+    """Replace a bank's example questions.
+
+    An empty list clears the entry, which puts the bank back on the generic
+    set — that is how you undo a customisation, not an error."""
+    try:
+        _safe_index_name(index_name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    with _doc_store_lock:
+        known = _load_full_doc_store()
+    if index_name not in known:
+        return jsonify({"error": f"Ukjent dokumentbank: {index_name}"}), 404
+
+    body = await request.get_json(force=True) or {}
+    raw = body.get("questions")
+    if not isinstance(raw, list):
+        return jsonify({"error": "Forventet 'questions' som liste"}), 400
+
+    questions = []
+    for q in raw:
+        if not isinstance(q, str):
+            continue
+        q = " ".join(q.split())          # collapse stray whitespace and newlines
+        if q and q not in questions:
+            questions.append(q[:MAX_EXAMPLE_LEN])
+    questions = questions[:MAX_EXAMPLES]
+
+    with _examples_lock:
+        data = _load_example_questions()
+        if questions:
+            data[index_name] = questions
+        else:
+            data.pop(index_name, None)
+        _save_example_questions(data)
+
+    return jsonify({"ok": True, "index_name": index_name,
+                    "questions": questions, "using_defaults": not questions})
 
 
 @app.get("/admin/index-query-types")
@@ -2534,6 +2679,7 @@ async def admin_add_entry():
             return jsonify({"error": "Missing 'file' in multipart body"}), 400
         try:
             fname = _safe_filename(uploaded.filename or "")
+            _check_upload_ext(fname)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
 
@@ -2564,6 +2710,10 @@ async def admin_add_entry():
         overwrite = _truthy(body.pop("overwrite", False))
         if not body.get("url") and not body.get("filnavn"):
             return jsonify({"error": "Entry must include 'url' or 'filnavn'"}), 400
+        try:
+            _validate_json_filnavn(body.get("filnavn") or "")
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
         entry = body
 
     with _doc_store_lock:

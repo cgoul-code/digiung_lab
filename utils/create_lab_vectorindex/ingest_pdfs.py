@@ -34,6 +34,8 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlsplit, urlunsplit
 
+import net_guard  # SSRF guard for all server-side URL fetches
+
 # Cache for parent SPA pages keyed by URL without fragment
 _SPA_PAGE_CACHE: dict[str, str] = {}
 
@@ -154,6 +156,7 @@ def _check_url(url: str, timeout: int = 15) -> tuple[bool, str]:
     plain URLs are checked with HEAD, falling back to GET for servers that reject HEAD.
     """
     try:
+        net_guard.assert_public_url(url)  # SSRF: no internal/metadata targets
         fragment = urlsplit(url).fragment
         if fragment and "/temabeskrivelse/" in fragment:
             # Confirms the parent page still contains this topic (also warms the cache).
@@ -350,7 +353,8 @@ def _apply_entry_metadata(doc: Document, entry: dict, source: str, filename: str
 
 
 def _http_get(url: str) -> str:
-    resp = requests.get(url, timeout=30, headers=_BROWSER_HEADERS)
+    # SSRF-guarded: validates the target and every redirect hop.
+    resp = net_guard.safe_get(url, headers=_BROWSER_HEADERS, timeout=30)
     resp.raise_for_status()
     if not resp.encoding or resp.encoding.lower() == "iso-8859-1":
         resp.encoding = resp.apparent_encoding or "utf-8"
