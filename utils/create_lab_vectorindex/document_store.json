@@ -421,7 +421,8 @@
       "segment": "Økonomi og samfunnsutvikling",
       "malgruppe": "Stortinget og beslutningstakere innen offentlig politikk",
       "oppsummering": "Dokumentet er Perspektivmeldingen 2024, en melding til Stortinget fra Finansdepartementet om langsiktige utfordringer i norsk økonomi og velferdsmodell frem mot 2060. Meldingen peker særlig på kamp om arbeidskraften, behov for omstilling som følge av geopolitikk, klimaendringer og lavere petroleumsaktivitet, samt behovet for å bevare god fordeling og velferdstjenester. Den analyserer utviklingstrekk i befolkning, arbeidsmarked, produktivitet, ressursbruk, ulikhet og finanspolitikk. Formålet er å gi et grunnlag for politikkutforming og drøfte hvilke retningsvalg som kan styrke bærekraften i norsk økonomi og velferdsstat over tid.",
-      "filnavn": null
+      "filnavn": null,
+      "dokumentkategori": "test"
     },
     {
       "url": "https://www.regjeringen.no/no/aktuelt/nasjonal-helse-og-samhandlingsplan-2024-2027-kortere-ventetider-og-en-felles-helsetjeneste/id3028011/",
@@ -430,7 +431,9 @@
       "type_kilde": "Nasjonal plan",
       "publisert_av": "Helse- og omsorgsdepartementet",
       "publisert_arstall": 2024,
-      "kilde_url": "https://www.regjeringen.no/no/aktuelt/nasjonal-helse-og-samhandlingsplan-2024-2027-kortere-ventetider-og-en-felles-helsetjeneste/id3028011/"
+      "kilde_url": "https://www.regjeringen.no/no/aktuelt/nasjonal-helse-og-samhandlingsplan-2024-2027-kortere-ventetider-og-en-felles-helsetjeneste/id3028011/",
+      "dokumentkategori": "test",
+      "filnavn": null
     },
     {
       "url": "https://www.regjeringen.no/no/dokumenter/nasjonal-sikkerhetsstrategi/id3099304/",
@@ -439,7 +442,9 @@
       "type_kilde": "Strategi",
       "publisert_av": "Regjeringen",
       "publisert_arstall": null,
-      "kilde_url": "https://www.regjeringen.no/no/dokumenter/nasjonal-sikkerhetsstrategi/id3099304/"
+      "kilde_url": "https://www.regjeringen.no/no/dokumenter/nasjonal-sikkerhetsstrategi/id3099304/",
+      "dokumentkategori": "test",
+      "filnavn": null
     },
     {
       "url": "https://www.regjeringen.no/no/tema/statlig-forvaltning/it-politikk/ny-nasjonal-digitaliseringsstrategi/id2982892/",
@@ -448,7 +453,9 @@
       "type_kilde": "Strategi",
       "publisert_av": "Digitaliserings- og forvaltningsdepartementet",
       "publisert_arstall": null,
-      "kilde_url": "https://www.regjeringen.no/no/tema/statlig-forvaltning/it-politikk/ny-nasjonal-digitaliseringsstrategi/id2982892/"
+      "kilde_url": "https://www.regjeringen.no/no/tema/statlig-forvaltning/it-politikk/ny-nasjonal-digitaliseringsstrategi/id2982892/",
+      "dokumentkategori": "test",
+      "filnavn": null
     },
     {
       "url": "https://www.regjeringen.no/contentassets/bef16daa907049d7a72170104eb88bae/no/pdfs/handlingsplan-kliniskestudier.pdf",
