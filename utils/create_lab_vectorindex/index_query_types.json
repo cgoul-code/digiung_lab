@@ -12,10 +12,17 @@
     "problems",
     "moments",
     "personas",
-    "free"
+    "free",
+    "strategisk_risiko_kopi"
   ],
   "Who-koden-morsmelkerstatning": [
     "free",
     "who_kode"
+  ],
+  "Strategisk_risiko": [
+    "free",
+    "strategisk_risiko",
+    "strategisk_risiko_kopi",
+    "tiltak2"
   ]
 }

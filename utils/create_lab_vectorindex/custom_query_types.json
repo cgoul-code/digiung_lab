@@ -7,5 +7,279 @@
     "aggregate_system": "Slå sammen punktlistene fra alle dokumentene til en konsolidert liste over tiltak og anbefalinger.\nGruppér like eller overlappende funn, gi hvert funn et kort navn, og skriv en beskrivelse på 1-2 setninger på norsk.\nTa med kildetitlene for dokumentene som støtter hvert funn.\nSvar kun i nøyaktig dette formatet:\n{{\"items\": [{{\"label\": \"Kort navn\", \"description\": \"1-2 setninger\", \"sources\": [\"Dokumenttittel\"]}}]}}",
     "extract_prompt": "Spørsmål: {question}\n\nDokumenttittel: {tittel}\n{context}\n\nHva sier dette dokumentet om spørsmålet?",
     "aggregate_prompt": "Spørsmål: {question}\nFunn fra {n_docs} rapporter:\n{all_findings}\nGi et strukturert svar på spørsmålet."
+  },
+  "strategisk_risiko_kopi": {
+    "label": "Strategisk risiko med konsekvenser",
+    "description": "Analysekjede per dokument: driver → sårbarhet → konsekvens → risiko",
+    "default_question": "Hvilke strategiske drivere, sårbarheter, konsekvenser og risikoer fremgår av dokumentet?",
+    "extract_system": "Du er en analyseassistent for strategisk risikoanalyse i Helsedirektoratet.\n\nDu analyserer ett kildedokument om gangen (årsrapporter, tildelingsbrev, hovedinstruks, strategi, riksrevisjonsrapport o.l.) og utleder mulige strategiske risikoer.\nArbeid etter analysekjeden: kildefunn -> driver -> relevans -> sårbarhet -> konsekvens -> risiko -> sannsynelighet -> avklaringsspørsmål.\n\nBegrepsapparat du SKAL holde adskilt:\n- Driver: et eksternt utviklingstrekk, styringskrav eller rammevilkår som kan påvirke direktoratets oppdrag, handlingsrom, prioriteringer eller måloppnåelse over tid. En driver er IKKE en risiko i seg selv.\n- Sårbarhet: et forhold ved direktoratets ansvar, rolle, kapasitet, kompetanse, styring, samhandling, data, teknologi, regelverksetterlevelse eller avhengigheter som kan svekke evnen til å møte en driver.\n- Konsekvens: hva det kan bety for måloppnåelse, samfunnsoppdrag, ressursbruk, styring og kontroll, sikkerhet, beredskap, legitimitet eller tillit.\n- Risiko: en usikkerhet som kan påvirke direktoratets evne til å ivareta samfunnsoppdrag, måloppnåelse, styringskrav eller prioriteringsevne over 3-5 år. Risiko oppstår når en driver møter en sårbarhet og kan gi vesentlig konsekvens.\n\nBruk et nøkternt, presist og direktoratstilpasset språk. Unngå konsulentspråk, dramatisering og bastante konklusjoner. Ikke foreslå tiltak. Ikke forveksle drivere, sårbarheter, konsekvenser og risiko. Ikke gjør operative forhold strategiske uten å forklare hvorfor de har strategisk betydning.\n\nSvar KUN med gyldig JSON i dette formatet (ingen tekst utenfor JSON):\n{\n  \"relevant\": true,\n  \"relevans\": \"kort vurdering av dokumentets relevans for strategisk risiko\",\n  \"kildegrunnlag_styrke\": \"kort vurdering av hvor sterkt kildegrunnlaget er\",\n  \"kildefunn\": [\"det dokumentet faktisk sier, direkte forankret i kilden\"],\n  \"drivere\": [\"mulige strategiske drivere\"],\n  \"sarbarheter\": [\"mulige sårbarheter som bør undersøkes, formulert som hypoteser/spørsmål\"],\n  \"konsekvenser\": [\"mulige konsekvenser\"],\n  \"risikoer\": [\"foreløpige strategiske risikoer, formulert som usikkerhet over 3-5 år\"],\n  \"avklaringssporsmal\": [\"spørsmål til videre avklaring\"]\n}\nHvis dokumentet ikke er relevant for strategisk risiko, svar: {\"relevant\": false}.",
+    "extract_prompt": "Spørsmål/fokus: {question}\n\nDokumenttittel: {tittel}\n{context}\n\nAnalyser dette dokumentet og svar med JSON som beskrevet.",
+    "aggregate_system": "Du er analytiker i risikoteamet. Du får analyser per dokument og skal lage en syntese på tvers - en longlist over mulige strategiske risikoområder.\nIdentifiser mønstre, slå sammen overlappende funn, og hold driver/sårbarhet/konsekvens/risiko adskilt. Oppgi hvilke kilder (titler) som peker i samme retning.\nBruk et nøkternt, presist og direktoratstilpasset språk. Ikke foreslå tiltak.\n\nBruk et nøkternt, presist og direktoratstilpasset språk. Unngå konsulentspråk, dramatisering og bastante konklusjoner. Ikke foreslå tiltak. Ikke forveksle drivere, sårbarheter, konsekvenser og risiko. Ikke gjør operative forhold strategiske uten å forklare hvorfor de har strategisk betydning.\n\nSvar KUN med gyldig JSON i dette formatet (ingen tekst utenfor JSON):\n{{\n  \"monstre\": [\"overordnede mønstre på tvers av dokumentene\"],\n  \"usikkerhet_kunnskapshull\": [\"usikkerhet og kunnskapshull\"],\n  \"sporsmal_til_ledergruppen\": [\"spørsmål til ledergruppen\"],\n  \"drivere_som_virker_mot_hverandre\": [\"Vise et eget avsnitt med drivere som virker mot hverandre, som leder motsatt mål\"],\n  \"temaer\": [\n    {{\n      \"label\": \"Kort navn på risikoområde/tema\",\n      \"beskrivelse\": \"1-3 setninger\",\n      \"drivere\": [\"drivere som støtter temaet\"],\n      \"sarbarheter\": [\"mulige sårbarheter som bør undersøkes\"],\n      \"konsekvenser\": [\"mulige konsekvenser\"],\n      \"risikoer\": [\"foreløpige strategiske risikoer\"],\n      \"sannsynelighet\": [\"Sannsynelighet for at risiko inntreffer\"],\n      \"sources\": [\"Tittel1\", \"Tittel2\"]\n    }}\n  ]\n}}",
+    "aggregate_prompt": "Spørsmål/fokus: {question}\nAnalyser per dokument fra {n_docs} dokumenter:\n{all_findings}\nLag en syntese på tvers som beskrevet.",
+    "structured": true,
+    "doc_fields": [
+      {
+        "key": "kildefunn",
+        "label": "Kildefunn",
+        "beskrivelse": "det dokumentet faktisk sier, direkte forankret i kilden"
+      },
+      {
+        "key": "drivere",
+        "label": "Drivere",
+        "beskrivelse": "mulige strategiske drivere"
+      },
+      {
+        "key": "sarbarheter",
+        "label": "Mulige sårbarheter",
+        "beskrivelse": "mulige sårbarheter som bør undersøkes, formulert som hypoteser/spørsmål"
+      },
+      {
+        "key": "konsekvenser",
+        "label": "Mulige konsekvenser",
+        "beskrivelse": "mulige konsekvenser"
+      },
+      {
+        "key": "risikoer",
+        "label": "Foreløpige risikoer",
+        "beskrivelse": "foreløpige strategiske risikoer, formulert som usikkerhet over 3-5 år",
+        "tone": "danger"
+      },
+      {
+        "key": "avklaringssporsmal",
+        "label": "Avklaringsspørsmål",
+        "beskrivelse": "spørsmål til videre avklaring",
+        "context": false
+      }
+    ],
+    "doc_notes": [
+      {
+        "key": "relevans",
+        "label": "Relevans",
+        "beskrivelse": "kort vurdering av dokumentets relevans for strategisk risiko",
+        "lead": true
+      },
+      {
+        "key": "kildegrunnlag_styrke",
+        "label": "Kildegrunnlagets styrke",
+        "beskrivelse": "kort vurdering av hvor sterkt kildegrunnlaget er"
+      }
+    ],
+    "agg_items_key": "temaer",
+    "agg_items_label": "risikoområder",
+    "agg_item_fields": [
+      {
+        "key": "drivere",
+        "label": "Drivere",
+        "beskrivelse": "drivere som støtter temaet",
+        "tone": "#DC2626"
+      },
+      {
+        "key": "sarbarheter",
+        "label": "Sårbarheter",
+        "beskrivelse": "mulige sårbarheter som bør undersøkes",
+        "tone": "#EA580C"
+      },
+      {
+        "key": "konsekvenser",
+        "label": "Konsekvenser",
+        "beskrivelse": "mulige konsekvenser",
+        "tone": "#D97706"
+      },
+      {
+        "key": "risikoer",
+        "label": "Risikoer",
+        "beskrivelse": "foreløpige strategiske risikoer",
+        "tone": "#16A34A"
+      },
+      {
+        "key": "sannsynelighet",
+        "label": "Sannsynelighet",
+        "beskrivelse": "Sannsynelighet for at risiko inntreffer",
+        "tone": "#0891B2"
+      }
+    ],
+    "agg_top_fields": [
+      {
+        "key": "monstre",
+        "label": "Overordnede mønstre",
+        "beskrivelse": "overordnede mønstre på tvers av dokumentene",
+        "lead": true
+      },
+      {
+        "key": "usikkerhet_kunnskapshull",
+        "label": "Usikkerhet og kunnskapshull",
+        "beskrivelse": "usikkerhet og kunnskapshull"
+      },
+      {
+        "key": "sporsmal_til_ledergruppen",
+        "label": "Spørsmål til ledergruppen",
+        "beskrivelse": "spørsmål til ledergruppen"
+      },
+      {
+        "key": "drivere_som_virker_mot_hverandre",
+        "label": "drivere som virker mot hverandre",
+        "beskrivelse": "Vise et eget avsnitt med drivere som virker mot hverandre, som leder motsatt mål"
+      }
+    ],
+    "wizard": {
+      "rolle": "Du er en analyseassistent for strategisk risikoanalyse i Helsedirektoratet.",
+      "oppdrag": "Du analyserer ett kildedokument om gangen (årsrapporter, tildelingsbrev, hovedinstruks, strategi, riksrevisjonsrapport o.l.) og utleder mulige strategiske risikoer.\nArbeid etter analysekjeden: kildefunn -> driver -> relevans -> sårbarhet -> konsekvens -> risiko -> sannsynelighet -> avklaringsspørsmål.",
+      "svarstil": "Bruk et nøkternt, presist og direktoratstilpasset språk. Unngå konsulentspråk, dramatisering og bastante konklusjoner. Ikke foreslå tiltak. Ikke forveksle drivere, sårbarheter, konsekvenser og risiko. Ikke gjør operative forhold strategiske uten å forklare hvorfor de har strategisk betydning.",
+      "irrelevant_regel": "Hvis dokumentet ikke er relevant for strategisk risiko",
+      "agg_rolle": "",
+      "agg_oppdrag": "Du er analytiker i risikoteamet. Du får analyser per dokument og skal lage en syntese på tvers - en longlist over mulige strategiske risikoområder.\nIdentifiser mønstre, slå sammen overlappende funn, og hold driver/sårbarhet/konsekvens/risiko adskilt. Oppgi hvilke kilder (titler) som peker i samme retning.\nBruk et nøkternt, presist og direktoratstilpasset språk. Ikke foreslå tiltak.",
+      "agg_svarstil": "",
+      "agg_svarstil_lik": true,
+      "agg_begreper": false,
+      "agg_rules": [
+        {
+          "text": "Identifiser mønstre som går igjen på tvers av dokumentene.",
+          "on": false
+        },
+        {
+          "text": "Slå sammen funn som overlapper eller beskriver det samme, i stedet for å gjenta dem.",
+          "on": false
+        },
+        {
+          "text": "Oppgi for hvert funn hvilke dokumenter (titler) som peker i samme retning.",
+          "on": false
+        },
+        {
+          "text": "Prioriter funn som støttes av flere dokumenter, og si tydelig fra når et funn bare bygger på ett.",
+          "on": false
+        },
+        {
+          "text": "List de best underbygde funnene først.",
+          "on": false
+        },
+        {
+          "text": "Ikke legg til funn som ikke finnes i analysene per dokument.",
+          "on": false
+        }
+      ],
+      "begreper": [
+        {
+          "term": "Driver",
+          "definisjon": "et eksternt utviklingstrekk, styringskrav eller rammevilkår som kan påvirke direktoratets oppdrag, handlingsrom, prioriteringer eller måloppnåelse over tid. En driver er IKKE en risiko i seg selv."
+        },
+        {
+          "term": "Sårbarhet",
+          "definisjon": "et forhold ved direktoratets ansvar, rolle, kapasitet, kompetanse, styring, samhandling, data, teknologi, regelverksetterlevelse eller avhengigheter som kan svekke evnen til å møte en driver."
+        },
+        {
+          "term": "Konsekvens",
+          "definisjon": "hva det kan bety for måloppnåelse, samfunnsoppdrag, ressursbruk, styring og kontroll, sikkerhet, beredskap, legitimitet eller tillit."
+        },
+        {
+          "term": "Risiko",
+          "definisjon": "en usikkerhet som kan påvirke direktoratets evne til å ivareta samfunnsoppdrag, måloppnåelse, styringskrav eller prioriteringsevne over 3-5 år. Risiko oppstår når en driver møter en sårbarhet og kan gi vesentlig konsekvens."
+        }
+      ],
+      "doc_fields": [
+        {
+          "key": "kildefunn",
+          "label": "Kildefunn",
+          "beskrivelse": "det dokumentet faktisk sier, direkte forankret i kilden"
+        },
+        {
+          "key": "drivere",
+          "label": "Drivere",
+          "beskrivelse": "mulige strategiske drivere"
+        },
+        {
+          "key": "sarbarheter",
+          "label": "Mulige sårbarheter",
+          "beskrivelse": "mulige sårbarheter som bør undersøkes, formulert som hypoteser/spørsmål"
+        },
+        {
+          "key": "konsekvenser",
+          "label": "Mulige konsekvenser",
+          "beskrivelse": "mulige konsekvenser"
+        },
+        {
+          "key": "risikoer",
+          "label": "Foreløpige risikoer",
+          "beskrivelse": "foreløpige strategiske risikoer, formulert som usikkerhet over 3-5 år",
+          "tone": "danger"
+        },
+        {
+          "key": "avklaringssporsmal",
+          "label": "Avklaringsspørsmål",
+          "beskrivelse": "spørsmål til videre avklaring",
+          "context": false
+        }
+      ],
+      "doc_notes": [
+        {
+          "key": "relevans",
+          "label": "Relevans",
+          "beskrivelse": "kort vurdering av dokumentets relevans for strategisk risiko",
+          "lead": true
+        },
+        {
+          "key": "kildegrunnlag_styrke",
+          "label": "Kildegrunnlagets styrke",
+          "beskrivelse": "kort vurdering av hvor sterkt kildegrunnlaget er"
+        }
+      ],
+      "agg_item_fields": [
+        {
+          "key": "drivere",
+          "label": "Drivere",
+          "beskrivelse": "drivere som støtter temaet",
+          "tone": "#DC2626"
+        },
+        {
+          "key": "sarbarheter",
+          "label": "Sårbarheter",
+          "beskrivelse": "mulige sårbarheter som bør undersøkes",
+          "tone": "#EA580C"
+        },
+        {
+          "key": "konsekvenser",
+          "label": "Konsekvenser",
+          "beskrivelse": "mulige konsekvenser",
+          "tone": "#D97706"
+        },
+        {
+          "key": "risikoer",
+          "label": "Risikoer",
+          "beskrivelse": "foreløpige strategiske risikoer",
+          "tone": "#16A34A"
+        },
+        {
+          "key": "sannsynelighet",
+          "label": "Sannsynelighet",
+          "beskrivelse": "Sannsynelighet for at risiko inntreffer",
+          "tone": "#0891B2"
+        }
+      ],
+      "agg_top_fields": [
+        {
+          "key": "monstre",
+          "label": "Overordnede mønstre",
+          "beskrivelse": "overordnede mønstre på tvers av dokumentene",
+          "lead": true
+        },
+        {
+          "key": "usikkerhet_kunnskapshull",
+          "label": "Usikkerhet og kunnskapshull",
+          "beskrivelse": "usikkerhet og kunnskapshull"
+        },
+        {
+          "key": "sporsmal_til_ledergruppen",
+          "label": "Spørsmål til ledergruppen",
+          "beskrivelse": "spørsmål til ledergruppen"
+        },
+        {
+          "key": "drivere_som_virker_mot_hverandre",
+          "label": "drivere som virker mot hverandre",
+          "beskrivelse": "Vise et eget avsnitt med drivere som virker mot hverandre, som leder motsatt mål"
+        }
+      ],
+      "item_label": "Kort navn på risikoområde/tema",
+      "item_beskrivelse": "1-3 setninger",
+      "items_label": "risikoområder"
+    }
   }
 }

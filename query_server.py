@@ -54,7 +54,7 @@ from llama_index.core.vector_stores import (
 from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
 from llama_index.llms.azure_openai import AzureOpenAI
 from langchain_openai import AzureChatOpenAI
-from aggregate_workflow import aggregate_graph, QUERY_TYPES
+from aggregate_workflow import aggregate_graph, QUERY_TYPES, _spec_fields
 import azure_blob
 import net_guard
 
@@ -128,6 +128,15 @@ INDEX_QT_BLOB_NAME = "index_query_types.json"
 EXAMPLES_STORE_PATH = os.getenv("EXAMPLES_STORE_PATH") or "./utils/create_lab_vectorindex/example_questions.json"
 EXAMPLES_BLOB_NAME = "example_questions.json"
 
+# Every store above that is written at runtime and mirrored to blob. Restored
+# on startup — add new stores here, or a deploy will revert them.
+SETTINGS_BLOBS = (
+    (PROMPTS_BLOB_NAME,   PROMPTS_STORE_PATH),
+    (CUSTOM_QT_BLOB_NAME, CUSTOM_QT_STORE_PATH),
+    (INDEX_QT_BLOB_NAME,  INDEX_QT_STORE_PATH),
+    (EXAMPLES_BLOB_NAME,  EXAMPLES_STORE_PATH),
+)
+
 print(f"[config] LOCAL={_LOCAL}", flush=True)
 print(f"[config] INDEX_STORAGE={INDEX_STORAGE}", flush=True)
 print(f"[config] DATA_DIR={DATA_DIR}", flush=True)
@@ -138,6 +147,7 @@ print(f"[config] BLOB_SYNC: enabled={azure_blob.ENABLED}  in_azure={azure_blob.I
 FILTERABLE_FIELDS = {
     "tittel",
     "segment",
+    "dokumentkategori",
     "antall_deltakere",
     "malgruppe",
     "publisert_av",
@@ -329,14 +339,13 @@ async def _load_all_indexes_async():
             azure_blob.bootstrap_download,
             INDEX_STORAGE, DATA_DIR, DOCUMENT_STORE_PATH,
         )
-        # Pull persisted prompt overrides too (best-effort; absent on first run).
-        await loop.run_in_executor(
-            None, azure_blob.download_file, PROMPTS_BLOB_NAME, PROMPTS_STORE_PATH,
-        )
-        # Pull persisted per-index analysetype selections (best-effort).
-        await loop.run_in_executor(
-            None, azure_blob.download_file, INDEX_QT_BLOB_NAME, INDEX_QT_STORE_PATH,
-        )
+        # Settings edited at runtime. A deploy overwrites these files with the
+        # committed copies, so blob is the canonical source and must win. A blob
+        # that doesn't exist yet leaves the local file alone (best-effort).
+        for blob_name, local_path in SETTINGS_BLOBS:
+            await loop.run_in_executor(
+                None, azure_blob.download_file, blob_name, local_path,
+            )
 
     if not os.path.isdir(INDEX_STORAGE):
         print(f"[index] INDEX_STORAGE not found: {INDEX_STORAGE}", flush=True)
@@ -375,10 +384,13 @@ async def _load_all_indexes_async():
         local_store = os.path.join(persist_dir, "document_store.json")
         doc_store_path = local_store if os.path.isfile(local_store) else DOCUMENT_STORE_PATH
 
-        def _load(d=persist_dir, n=name):
+        def _load(d=persist_dir, n=name, p=doc_store_path):
             print(f"[index] Loading '{n}' from {d} ...", flush=True)
             ctx = StorageContext.from_defaults(persist_dir=d)
             idx = load_index_from_storage(ctx)
+            # Labels edited since the last build live in the list, not in the
+            # index files — apply them before anything queries this.
+            _refresh_loaded_index(n, idx, p)
             print(f"[index] '{n}' ready.", flush=True)
             return idx
 
@@ -870,6 +882,7 @@ async def query():
             "type_kilde":       meta.get("type_kilde", ""),
             "malgruppe":        meta.get("malgruppe", ""),
             "segment":          meta.get("segment", ""),
+            "dokumentkategori": meta.get("dokumentkategori", ""),
             "kilde_url":        meta.get("kilde_url", ""),
             "page_number":      meta.get("page_label") or meta.get("page"),
             "score":            round(float(getattr(nws, "score", 0.0)), 4),
@@ -1147,64 +1160,75 @@ def _add_chunk_references(doc, chunks):
             _add_hyperlink(p, deep, "↗ åpne sitatet på nettsiden")
 
 
-def _render_risk_report(doc, result: dict, items: list, per_doc: list):
-    """Render the strategisk_risiko report: optional cross-document syntese
-    followed by the evidence for it, broken down per finding."""
+def _render_structured_report(doc, cfg: dict, result: dict, items: list, per_doc: list):
+    """Render a structured analysis: optional cross-document syntese followed by
+    the evidence for it, broken down per finding.
+
+    Which headings appear is the template's business — Strategisk risiko declares
+    its analysekjede, a wizard-built template declares whatever it asks for, and
+    this walks the declaration either way."""
+    top_fields  = _spec_fields(cfg, "agg_top_fields")
+    item_fields = _spec_fields(cfg, "agg_item_fields")
+    lead = [f for f in top_fields if f.get("lead")]
+    tail = [f for f in top_fields if not f.get("lead")]
+
     # ── Syntese på tvers — only when aggregation ran and produced content ──
-    if result.get("aggregated") and (items or result.get("monstre")):
+    if result.get("aggregated") and (items or any(result.get(f["key"]) for f in top_fields)):
         doc.add_heading("Syntese på tvers av dokumentene", level=2)
-        _add_bullets(doc, "Overordnede mønstre:", result.get("monstre"))
+        for field in lead:
+            _add_bullets(doc, f"{field['label']}:", result.get(field["key"]))
         for item in items:
             doc.add_heading(_xml_safe(item.get("label", "")), level=3)
             if item.get("beskrivelse"):
                 doc.add_paragraph(_xml_safe(item["beskrivelse"]))
-            _add_bullets(doc, "Drivere:",       item.get("drivere"))
-            _add_bullets(doc, "Sårbarheter:",    item.get("sarbarheter"))
-            _add_bullets(doc, "Konsekvenser:",   item.get("konsekvenser"))
-            _add_bullets(doc, "Risikoer:",       item.get("risikoer"))
+            for field in item_fields:
+                _add_bullets(doc, f"{field['label']}:", item.get(field["key"]))
             if item.get("sources"):
                 p = doc.add_paragraph("Kilder: ")
                 p.add_run(_source_labels(item["sources"])).italic = True
-        _add_bullets(doc, "Usikkerhet og kunnskapshull:", result.get("usikkerhet_kunnskapshull"))
-        _add_bullets(doc, "Spørsmål til ledergruppen:",   result.get("sporsmal_til_ledergruppen"))
+        for field in tail:
+            _add_bullets(doc, f"{field['label']}:", result.get(field["key"]))
 
     # ── Analyse per funn ──
     # Without a synthesis there are no findings to hang documents on, so that
     # case keeps the per-document listing.
     if per_doc and result.get("aggregated") and items:
-        _render_risk_findings_detail(doc, items, per_doc)
+        _render_structured_findings_detail(doc, cfg, items, per_doc)
     elif per_doc:
         doc.add_heading("Analyse per dokument", level=2)
         for entry in per_doc:
             _doc_heading_with_link(doc, entry)
-            _risk_doc_body(doc, entry)
+            _structured_doc_body(doc, cfg, entry)
 
 
-def _risk_doc_body(doc, entry: dict) -> None:
-    """One document's full analysekjede, under a heading the caller has written."""
+def _structured_doc_body(doc, cfg: dict, entry: dict) -> None:
+    """One document's full answer, under a heading the caller has written."""
     s = entry.get("structured") or {}
-    if s.get("relevans"):
+    notes = _spec_fields(cfg, "doc_notes")
+    lead = [f for f in notes if f.get("lead")]
+    tail = [f for f in notes if not f.get("lead")]
+
+    def _note(field):
+        if not s.get(field["key"]):
+            return
         p = doc.add_paragraph()
-        p.add_run("Relevans: ").bold = True
-        p.add_run(_xml_safe(s["relevans"]))
-    _add_bullets(doc, "Kildefunn:",            s.get("kildefunn"))
-    _add_bullets(doc, "Drivere:",              s.get("drivere"))
-    _add_bullets(doc, "Mulige sårbarheter:",   s.get("sarbarheter"))
-    _add_bullets(doc, "Mulige konsekvenser:",  s.get("konsekvenser"))
-    _add_bullets(doc, "Foreløpige risikoer:",  s.get("risikoer"))
-    _add_bullets(doc, "Avklaringsspørsmål:",   s.get("avklaringssporsmal"))
-    if s.get("kildegrunnlag_styrke"):
-        p = doc.add_paragraph()
-        p.add_run("Kildegrunnlagets styrke: ").bold = True
-        p.add_run(_xml_safe(s["kildegrunnlag_styrke"]))
+        p.add_run(f"{field['label']}: ").bold = True
+        p.add_run(_xml_safe(str(s[field["key"]])))
+
+    for field in lead:
+        _note(field)
+    for field in _spec_fields(cfg, "doc_fields"):
+        _add_bullets(doc, f"{field['label']}:", s.get(field["key"]))
+    for field in tail:
+        _note(field)
     if not s:  # defensive fallback
         for finding in entry.get("findings", []):
             doc.add_paragraph(_xml_safe(finding), style="List Bullet")
     _add_chunk_references(doc, entry.get("chunks"))
 
 
-def _render_risk_findings_detail(doc, items: list, per_doc: list) -> None:
-    """Every risk area followed by the documents behind it and what each one
+def _render_structured_findings_detail(doc, cfg: dict, items: list, per_doc: list) -> None:
+    """Every finding followed by the documents behind it and what each one
     contributed — the report counterpart of the per-finding view on screen."""
     by_title = {}
     for entry in per_doc:
@@ -1245,11 +1269,15 @@ def _render_risk_findings_detail(doc, items: list, per_doc: list) -> None:
             cited.add(_norm_title(tittel))
             _doc_heading(doc, entry, level=4)
             sd = entry.get("structured") or {}
-            if sd.get("relevans"):
-                para = doc.add_paragraph()
-                para.add_run("Relevans: ").bold = True
-                para.add_run(_xml_safe(sd["relevans"]))
-            extracted = sd.get("kildefunn") or entry.get("findings")
+            for field in _spec_fields(cfg, "doc_notes"):
+                if field.get("lead") and sd.get(field["key"]):
+                    para = doc.add_paragraph()
+                    para.add_run(f"{field['label']}: ").bold = True
+                    para.add_run(_xml_safe(str(sd[field["key"]])))
+            # Under a finding there is room for one list, so it is the field the
+            # template says the document is read for.
+            first = _spec_fields(cfg, "doc_fields")[:1]
+            extracted = (sd.get(first[0]["key"]) if first else None) or entry.get("findings")
             _add_bullets(doc, "Trukket ut fra dokumentet:", extracted)
             _add_quotes(doc, _chunks_for(entry, pages))
 
@@ -1259,7 +1287,7 @@ def _render_risk_findings_detail(doc, items: list, per_doc: list) -> None:
         doc.add_heading("Dokumenter uten sitater i funnene over", level=2)
         for entry in leftovers:
             _doc_heading_with_link(doc, entry)
-            _risk_doc_body(doc, entry)
+            _structured_doc_body(doc, cfg, entry)
 
 
 def _norm_title(s: str) -> str:
@@ -1387,6 +1415,7 @@ def _generate_report_docx(result: dict) -> bytes:
     doc     = Document()
     qt      = result.get("query_type", "")
     idx     = result.get("index_name", "")
+    cfg     = _effective_cfg(qt) or {}
     items   = result.get(OUTPUT_KEYS.get(qt, "findings"), [])
     per_doc = result.get("per_doc_findings", [])
 
@@ -1403,8 +1432,10 @@ def _generate_report_docx(result: dict) -> bytes:
         f"{len(items)} resultater"
     )
 
-    if qt == "strategisk_risiko":
-        _render_risk_report(doc, result, items, per_doc)
+    # A structured template answers in its own shape, so the report follows what
+    # it declared rather than the flat finding list below.
+    if cfg.get("structured"):
+        _render_structured_report(doc, cfg, result, items, per_doc)
         buf = BytesIO()
         doc.save(buf)
         return buf.getvalue()
@@ -1525,6 +1556,89 @@ def _files_dir_for(index_name: str) -> str:
     return os.path.join(DATA_DIR, _safe_index_name(index_name))
 
 
+# What a document is, as opposed to what it says. These are carried on every
+# node as labels — /query filters on them and the views show them — and none of
+# them is an embedding, so they can be rewritten on a built index.
+NODE_META_FIELDS = (
+    "tittel", "publisert_arstall", "publisert_av", "type_kilde", "malgruppe",
+    "antall_deltakere", "segment", "dokumentkategori", "oppsummering",
+    "kilde_url", "kilde_type",
+)
+
+
+def _meta_values(entry: dict) -> dict:
+    """An entry's labels, normalised the way ingest writes them."""
+    return {
+        f: entry.get(f) if f == "publisert_arstall" else (entry.get(f) or "")
+        for f in NODE_META_FIELDS
+    }
+
+
+def _path_variants(value: str) -> set[str]:
+    """A path or URL as the other side may spell it: ingest stores an absolute
+    source_file and a bare filename, the list stores a relative path."""
+    v = (value or "").strip().replace("\\", "/")
+    if not v:
+        return set()
+    return {v, v.rsplit("/", 1)[-1]}
+
+
+def _entry_node_keys(entry: dict) -> set[str]:
+    return _path_variants(entry.get("url") or "") | _path_variants(entry.get("filnavn") or "")
+
+
+def _node_keys(meta: dict) -> set[str]:
+    keys = set()
+    for field in ("filename", "source_file", "url"):
+        keys |= _path_variants(meta.get(field) if isinstance(meta.get(field), str) else "")
+    return keys
+
+
+def _refresh_index_metadata(name: str, idx, entries: list[dict]) -> int:
+    """Write the document list's labels onto the nodes of a loaded index.
+
+    Called on load and after an edit. Nothing is persisted: the list is the
+    source of truth and this runs again on every load, so the index files only
+    catch up when the document is next built — which no one sees, because no
+    query reads them without going through here first.
+    """
+    by_key: dict[str, dict] = {}
+    for entry in entries or []:
+        values = _meta_values(entry)
+        for key in _entry_node_keys(entry):
+            by_key[key] = values
+    if not by_key:
+        return 0
+
+    docstore = idx.storage_context.docstore
+    vec_data = getattr(getattr(idx, "vector_store", None), "_data", None)
+    vec_meta = getattr(vec_data, "metadata_dict", None)
+
+    changed = []
+    for node_id, node in list(docstore.docs.items()):
+        meta = node.metadata or {}
+        values = next((by_key[k] for k in _node_keys(meta) if k in by_key), None)
+        if values is None or all(meta.get(f) == v for f, v in values.items()):
+            continue
+        node.metadata.update(values)
+        changed.append(node)
+        if isinstance(vec_meta, dict) and isinstance(vec_meta.get(node_id), dict):
+            vec_meta[node_id].update(values)
+
+    if changed:
+        docstore.add_documents(changed, allow_update=True)
+        print(f"[meta] '{name}': refreshed labels on {len(changed)} node(s)", flush=True)
+    return len(changed)
+
+
+def _refresh_loaded_index(name: str, idx, doc_store_path: str) -> None:
+    """Best-effort: stale labels are cosmetic, a failed index load is not."""
+    try:
+        _refresh_index_metadata(name, idx, _read_doc_store_entries(doc_store_path, name))
+    except Exception as e:
+        logging.warning("Metadata refresh failed for %s: %s", name, e)
+
+
 def _load_full_doc_store() -> dict:
     if not os.path.isfile(DOCUMENT_STORE_PATH):
         return {}
@@ -1614,6 +1728,13 @@ CUSTOM_QT_TEXT_FIELDS = (
 # Without these the analysis has no instruction to run; the rest can be blank.
 CUSTOM_QT_REQUIRED = ("label", "extract_system", "aggregate_system")
 
+# Set by the wizard, not typed by hand: the shape of the JSON a structured
+# template asks for, plus the answers it was built from so it can be reopened.
+CUSTOM_QT_SPEC_FIELDS = (
+    "structured", "doc_fields", "doc_notes",
+    "agg_items_key", "agg_items_label", "agg_item_fields", "agg_top_fields", "wizard",
+)
+
 
 def _load_custom_query_types() -> dict:
     if not os.path.isfile(CUSTOM_QT_STORE_PATH):
@@ -1648,6 +1769,297 @@ def _check_aggregate_prompt(text: str) -> None:
             f"kan tolkes ({e}). JSON-eksempler må ha doble klammer: "
             '{{"items": [...]}} i stedet for {"items": [...]}.'
         )
+
+
+# ── Analysemal-veiviseren ─────────────────────────────────────────────────────
+# The wizard asks what the analysis should look for and what it should hand back;
+# the four prompts are written from those answers here, on the server, so the
+# preview the author approves is the text the analysis actually runs. Its own
+# answers are stored alongside (`wizard`), so the template can be reopened and
+# changed in the same terms it was written in — rather than by editing prose that
+# has to stay in step with a JSON example further down.
+#
+# Shape is Strategisk risiko's: per document a JSON object with a list per
+# declared field, and across documents a list of items each carrying the same
+# fields, under `temaer`.
+
+WIZARD_ITEMS_KEY = "temaer"
+MAX_WIZARD_FIELDS = 12
+MAX_WIZARD_RULES = 20
+
+# How the synthesis merges findings, ticked in the wizard. The sentences live
+# here so every template states a rule the same way, and the client shows them
+# verbatim — what is ticked is what the model reads.
+WIZARD_AGG_RULES = {
+    "monstre":      "Identifiser mønstre som går igjen på tvers av dokumentene.",
+    "sla_sammen":   "Slå sammen funn som overlapper eller beskriver det samme, i stedet for å gjenta dem.",
+    "kilder":       "Oppgi for hvert funn hvilke dokumenter (titler) som peker i samme retning.",
+    "flere_kilder": "Prioriter funn som støttes av flere dokumenter, og si tydelig fra når et funn bare bygger på ett.",
+    "sorter":       "List de best underbygde funnene først.",
+    "ikke_nytt":    "Ikke legg til funn som ikke finnes i analysene per dokument.",
+}
+# Not a sentence of its own: carries the concept definitions from the
+# per-document step into the synthesis as well.
+WIZARD_AGG_CONCEPTS = "begreper"
+
+
+def _esc_braces(text: str) -> str:
+    """aggregate_system goes through .format() before it is sent, so text written
+    by an author has its braces doubled — a JSON example in an instruction is
+    something to show the model, not a placeholder to substitute."""
+    return (text or "").replace("{", "{{").replace("}", "}}")
+
+
+def _clean_spec_fields(raw, what: str, *, required=True) -> list[dict]:
+    """Validate one list of author-defined JSON fields → [{key, label, ...}]."""
+    if raw in (None, ""):
+        raw = []
+    if not isinstance(raw, list):
+        raise ValueError(f"{what}: forventet en liste med felt.")
+    out, seen = [], set()
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise ValueError(f"{what}: hvert felt må være et objekt.")
+        key = (entry.get("key") or "").strip().lower()
+        if not re.fullmatch(r"[a-z0-9_]{2,40}", key):
+            raise ValueError(
+                f"{what}: ugyldig feltnøkkel {entry.get('key')!r}. "
+                "Bruk 2-40 tegn: små bokstaver, tall og understrek."
+            )
+        if key in ("relevant", "label", "beskrivelse", "sources", WIZARD_ITEMS_KEY):
+            raise ValueError(f"{what}: «{key}» er reservert og kan ikke brukes som feltnøkkel.")
+        if key in seen:
+            raise ValueError(f"{what}: feltnøkkelen «{key}» er brukt mer enn én gang.")
+        seen.add(key)
+        label = (entry.get("label") or "").strip()
+        if not label:
+            raise ValueError(f"{what}: feltet «{key}» mangler en overskrift.")
+        field = {"key": key, "label": label}
+        desc = (entry.get("beskrivelse") or entry.get("description") or "").strip()
+        if desc:
+            field["beskrivelse"] = desc
+        if entry.get("lead"):
+            field["lead"] = True
+        if entry.get("context") is False:
+            field["context"] = False
+        # tone marks a field with a coloured margin stripe. Legacy value
+        # "danger" (red) is still accepted; otherwise a #rrggbb colour.
+        tone = (entry.get("tone") or "").strip()
+        if tone:
+            if tone != "danger" and not re.fullmatch(r"#[0-9a-fA-F]{6}", tone):
+                raise ValueError(f"{what}: ugyldig strekfarge {tone!r} (bruk #rrggbb).")
+            field["tone"] = tone
+        out.append(field)
+    if required and not out:
+        raise ValueError(f"{what}: legg til minst ett felt.")
+    if len(out) > MAX_WIZARD_FIELDS:
+        raise ValueError(f"{what}: høyst {MAX_WIZARD_FIELDS} felt.")
+    return out
+
+
+def _clean_wizard_spec(raw) -> dict:
+    """Validate the wizard's answers → the spec the template is written from."""
+    if not isinstance(raw, dict):
+        raise ValueError("Veiviseren sendte ingen svar å bygge malen av.")
+
+    spec = {
+        "rolle":           (raw.get("rolle") or "").strip(),
+        "oppdrag":         (raw.get("oppdrag") or "").strip(),
+        "svarstil":        (raw.get("svarstil") or "").strip(),
+        "irrelevant_regel": (raw.get("irrelevant_regel") or "").strip(),
+        "agg_rolle":       (raw.get("agg_rolle") or "").strip(),
+        # A spec from before the summary had parts kept all of it in one free
+        # text. That text is the task now, and nothing is added around it.
+        "agg_oppdrag":     (raw.get("agg_oppdrag") or raw.get("agg_instruksjon") or "").strip(),
+        "agg_svarstil":    (raw.get("agg_svarstil") or "").strip(),
+        # True: the synthesis answers in the same style as the documents.
+        "agg_svarstil_lik": bool(raw.get("agg_svarstil_lik")),
+    }
+    if not spec["oppdrag"]:
+        raise ValueError("Skriv hva analysen skal spørre hvert dokument om.")
+    if not spec["agg_oppdrag"]:
+        raise ValueError("Skriv hva oppsummeringen skal gjøre på tvers av dokumentene.")
+
+    # Aggregation rules are author-editable free text: a list of {text, on}.
+    # Older specs (and the built-in seeds) instead carry a list of keys in
+    # `agg_regler`; map those to their canonical sentences so both shapes compose
+    # identically. `agg_begreper` carries the concept definitions into the
+    # synthesis (was the "begreper" key in agg_regler).
+    raw_rules = raw.get("agg_rules")
+    if raw_rules is None:
+        regler = raw.get("agg_regler") or []
+        if not isinstance(regler, list):
+            raise ValueError("Reglene for oppsummeringen må være en liste.")
+        chosen = set(regler)
+        raw_rules = [{"text": WIZARD_AGG_RULES[k], "on": True}
+                     for k in WIZARD_AGG_RULES if k in chosen]
+        spec["agg_begreper"] = WIZARD_AGG_CONCEPTS in chosen
+    else:
+        spec["agg_begreper"] = bool(raw.get("agg_begreper"))
+    if not isinstance(raw_rules, list):
+        raise ValueError("Reglene for oppsummeringen må være en liste.")
+    rules = []
+    for entry in raw_rules:
+        if not isinstance(entry, dict):
+            raise ValueError("Hver regel må være et objekt med tekst.")
+        text = (entry.get("text") or "").strip()
+        if not text:
+            continue
+        if len(text) > 400:
+            raise ValueError("En regel kan være høyst 400 tegn.")
+        rules.append({"text": text, "on": entry.get("on", True) is not False})
+    if len(rules) > MAX_WIZARD_RULES:
+        raise ValueError(f"Høyst {MAX_WIZARD_RULES} regler for oppsummeringen.")
+    spec["agg_rules"] = rules
+
+    begreper = []
+    for entry in (raw.get("begreper") or []):
+        if not isinstance(entry, dict):
+            continue
+        term = (entry.get("term") or "").strip()
+        definisjon = (entry.get("definisjon") or "").strip()
+        if not term:
+            continue
+        if not definisjon:
+            raise ValueError(f"Begrepet «{term}» mangler en definisjon.")
+        begreper.append({"term": term, "definisjon": definisjon})
+    if len(begreper) > MAX_WIZARD_FIELDS:
+        raise ValueError(f"Høyst {MAX_WIZARD_FIELDS} sentrale begrep.")
+    spec["begreper"] = begreper
+
+    spec["doc_fields"] = _clean_spec_fields(raw.get("doc_fields"), "Felt per dokument")
+    spec["doc_notes"] = _clean_spec_fields(raw.get("doc_notes"), "Vurderinger per dokument", required=False)
+    spec["agg_item_fields"] = _clean_spec_fields(raw.get("agg_item_fields"), "Felt per funn i oppsummeringen")
+    spec["agg_top_fields"] = _clean_spec_fields(raw.get("agg_top_fields"), "Felt på tvers i oppsummeringen", required=False)
+
+    overlap = {f["key"] for f in spec["doc_fields"]} & {f["key"] for f in spec["doc_notes"]}
+    if overlap:
+        raise ValueError(
+            f"«{sorted(overlap)[0]}» er både en liste og en vurdering per dokument — "
+            "samme nøkkel kan bare brukes én gang i dokumentsvaret."
+        )
+    overlap = {f["key"] for f in spec["agg_item_fields"]} & {f["key"] for f in spec["agg_top_fields"]}
+    if overlap:
+        raise ValueError(
+            f"«{sorted(overlap)[0]}» ligger både under det enkelte funnet og på tvers — "
+            "samme nøkkel kan bare brukes én gang i oppsummeringen."
+        )
+
+    spec["item_label"] = (raw.get("item_label") or "").strip() or "Kort navn på funnet"
+    spec["item_beskrivelse"] = (raw.get("item_beskrivelse") or "").strip() or "1-3 setninger"
+    # What one entry in the synthesis is called, for «12 risikoområder» over the
+    # result. Plural, lowercase.
+    spec["items_label"] = (raw.get("items_label") or "").strip() or "funn"
+    return spec
+
+
+def _json_lines(fields: list[dict], *, list_valued: bool, indent: str) -> list[str]:
+    """The declared fields written out as lines of a JSON example."""
+    lines = []
+    for f in fields:
+        hint = f.get("beskrivelse") or f["label"].lower()
+        value = f'["{hint}"]' if list_valued else f'"{hint}"'
+        lines.append(f'{indent}"{f["key"]}": {value}')
+    return lines
+
+
+def _concepts_block(begreper: list[dict]) -> str:
+    return (
+        "Begrepsapparat du SKAL holde adskilt:\n"
+        + "\n".join(f"- {b['term']}: {b['definisjon']}" for b in begreper)
+    )
+
+
+def _compose_wizard_prompts(spec: dict) -> dict:
+    """The spec written out as the four prompts the workflow runs."""
+    # ── Per document ──
+    parts = []
+    if spec["rolle"]:
+        parts.append(spec["rolle"])
+    parts.append(spec["oppdrag"])
+    if spec["begreper"]:
+        parts.append(_concepts_block(spec["begreper"]))
+    if spec["svarstil"]:
+        parts.append(spec["svarstil"])
+
+    body = ['  "relevant": true']
+    body += _json_lines(spec["doc_notes"], list_valued=False, indent="  ")
+    body += _json_lines(spec["doc_fields"], list_valued=True, indent="  ")
+    irrelevant = spec["irrelevant_regel"] or "Hvis dokumentet ikke er relevant"
+    parts.append(
+        "Svar KUN med gyldig JSON i dette formatet (ingen tekst utenfor JSON):\n"
+        "{\n" + ",\n".join(body) + "\n}\n"
+        + f'{irrelevant}, svar: {{"relevant": false}}.'
+    )
+    extract_system = "\n\n".join(parts)
+
+    # ── Across documents ──
+    # Same order as per document: who, what, how to merge, concepts, style.
+    agg_parts = []
+    if spec.get("agg_rolle"):
+        agg_parts.append(spec["agg_rolle"])
+    agg_parts.append(spec["agg_oppdrag"])
+    rules = [r["text"] for r in (spec.get("agg_rules") or []) if r.get("on") and r.get("text")]
+    if rules:
+        agg_parts.append("Slik slår du sammen funnene:\n" + "\n".join(f"- {r}" for r in rules))
+    if spec.get("agg_begreper") and spec["begreper"]:
+        agg_parts.append(_concepts_block(spec["begreper"]))
+    agg_style = spec["svarstil"] if spec.get("agg_svarstil_lik") else spec.get("agg_svarstil")
+    if agg_style:
+        agg_parts.append(agg_style)
+
+    # Everything an author wrote is shown to the model, never substituted into.
+    item_lines = [
+        f'      "label": "{spec["item_label"]}"',
+        f'      "beskrivelse": "{spec["item_beskrivelse"]}"',
+    ]
+    item_lines += _json_lines(spec["agg_item_fields"], list_valued=True, indent="      ")
+    item_lines.append('      "sources": ["Tittel1", "Tittel2"]')
+
+    top_lines = _json_lines(spec["agg_top_fields"], list_valued=True, indent="  ")
+    top_lines.append(
+        f'  "{WIZARD_ITEMS_KEY}": [\n    {{\n' + ",\n".join(item_lines) + "\n    }\n  ]"
+    )
+
+    aggregate_system = (
+        _esc_braces("\n\n".join(agg_parts))
+        + "\n\nSvar KUN med gyldig JSON i dette formatet (ingen tekst utenfor JSON):\n"
+        + _esc_braces("{\n" + ",\n".join(top_lines) + "\n}")
+    )
+
+    return {
+        "extract_system": extract_system,
+        "extract_prompt": (
+            "Spørsmål/fokus: {question}\n\n"
+            "Dokumenttittel: {tittel}\n{context}\n\n"
+            "Analyser dette dokumentet og svar med JSON som beskrevet."
+        ),
+        "aggregate_system": aggregate_system,
+        "aggregate_prompt": (
+            "Spørsmål/fokus: {question}\n"
+            "Analyser per dokument fra {n_docs} dokumenter:\n{all_findings}\n"
+            "Lag en syntese på tvers som beskrevet."
+        ),
+    }
+
+
+def _wizard_config(spec: dict) -> dict:
+    """The stored template: the composed prompts, the shape the renderers read,
+    and the answers it was written from."""
+    # The top field stands for the document where only one list fits, so the
+    # order the author set is all it takes.
+    doc_fields = [dict(f) for f in spec["doc_fields"]]
+    return {
+        **_compose_wizard_prompts(spec),
+        "structured":      True,
+        "doc_fields":      doc_fields,
+        "doc_notes":       [dict(f) for f in spec["doc_notes"]],
+        "agg_items_key":   WIZARD_ITEMS_KEY,
+        "agg_items_label": spec["items_label"],
+        "agg_item_fields": [dict(f) for f in spec["agg_item_fields"]],
+        "agg_top_fields":  [dict(f) for f in spec["agg_top_fields"]],
+        "wizard":          spec,
+    }
 
 
 _SUGGEST_QT_SYSTEM = (
@@ -1763,11 +2175,14 @@ def _save_index_query_types(data: dict) -> None:
 
 
 def _clean_query_type_keys(keys) -> list:
-    """Keep only known query-type keys, de-duplicated and in catalogue order."""
+    """Keep only known query-type keys, de-duplicated and in catalogue order.
+
+    Custom types count as known — a bank pinned to one at creation time would
+    otherwise silently lose it and fall back to the defaults."""
     if not isinstance(keys, list):
         return []
     wanted = {k for k in keys if isinstance(k, str)}
-    return [qt for qt in QUERY_TYPES if qt in wanted]
+    return [qt for qt in _effective_query_types() if qt in wanted]
 
 
 def _effective_query_types() -> dict:
@@ -1789,7 +2204,9 @@ def _effective_query_types() -> dict:
         if qt in effective or not isinstance(cfg, dict):
             continue
         merged = dict(cfg)
-        merged["output_key"] = "findings"   # the generic finding shape
+        # One key for every custom type, structured or not — what the items hold
+        # is declared in the type's own fields, not signalled by where they sit.
+        merged["output_key"] = "findings"
         merged["custom"] = True
         merged.setdefault("default_question", "")
         effective[qt] = merged
@@ -2372,6 +2789,10 @@ async def admin_list_query_types():
             "default_question": cfg.get("default_question") or "",
             "extract_system":   cfg.get("extract_system") or "",
             "aggregate_system": cfg.get("aggregate_system") or "",
+            # A wizard-built type is reopened in the wizard, not in the text
+            # boxes — the panel needs to know which it is before you click.
+            "structured":       bool(cfg.get("structured")),
+            "wizard":           cfg.get("wizard") or None,
         })
     out.sort(key=lambda r: (r["custom"], r["key"]))
     return jsonify({"query_types": out})
@@ -2396,10 +2817,27 @@ async def admin_suggest_query_type():
     return jsonify({"ok": True, **out})
 
 
+@app.post("/admin/query-types/compose")
+async def admin_compose_query_type():
+    """Write the four prompts from the wizard's answers, without saving anything.
+
+    The wizard shows the result before you commit to it: the text here is the
+    text a save would store, so what you approve is what runs."""
+    body = await request.get_json(force=True) or {}
+    try:
+        spec = _clean_wizard_spec(body.get("wizard") or body)
+        prompts = _compose_wizard_prompts(spec)
+        _check_aggregate_prompt(prompts["aggregate_system"])
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, **prompts})
+
+
 @app.post("/admin/query-types")
 async def admin_create_query_type():
-    """Create an analysetype. `copy_from` seeds the prompts from an existing one,
-    so a new type can start from something that already works."""
+    """Create an analysetype. `wizard` builds a structured one from the veiviser's
+    answers; `copy_from` seeds the prompts from an existing type, so a new one can
+    start from something that already works."""
     body = await request.get_json(force=True) or {}
     try:
         key = _safe_qt_key((body.get("key") or "").strip().lower())
@@ -2419,11 +2857,25 @@ async def admin_create_query_type():
                 return jsonify({"error": f"Ukjent analysetype å kopiere fra: {source}"}), 400
             for f in CUSTOM_QT_TEXT_FIELDS:
                 cfg[f] = base.get(f) or ""
+            # Copying a structured type copies its shape too, or the new one
+            # would ask for JSON that nothing knows how to read back.
+            for f in CUSTOM_QT_SPEC_FIELDS:
+                if base.get(f) not in (None, ""):
+                    cfg[f] = base[f]
 
         for f in CUSTOM_QT_TEXT_FIELDS:
             v = body.get(f)
             if isinstance(v, str) and v.strip():
                 cfg[f] = v
+
+        # The wizard writes the prompts and the shape together, and it goes last:
+        # its answers are the source, so the text composed from them wins over a
+        # copied prompt or a stale preview sent back with the form.
+        if body.get("wizard"):
+            try:
+                cfg.update(_wizard_config(_clean_wizard_spec(body["wizard"])))
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
 
         missing = [f for f in CUSTOM_QT_REQUIRED if not (cfg.get(f) or "").strip()]
         if missing:
@@ -2463,6 +2915,13 @@ async def admin_update_query_type(qt):
                 v = body.get(f)
                 if isinstance(v, str):
                     cfg[f] = v
+            # Reopened in the wizard: the answers are the source, so both the
+            # prompts and the JSON shape are rewritten from them.
+            if body.get("wizard"):
+                try:
+                    cfg.update(_wizard_config(_clean_wizard_spec(body["wizard"])))
+                except ValueError as e:
+                    return jsonify({"error": str(e)}), 400
             missing = [f for f in CUSTOM_QT_REQUIRED if not (cfg.get(f) or "").strip()]
             if missing:
                 return jsonify({"error": f"Mangler: {', '.join(missing)}"}), 400
@@ -2701,6 +3160,7 @@ async def admin_add_entry():
             "malgruppe":        form.get("malgruppe") or "",
             "antall_deltakere": form.get("antall_deltakere") or None,
             "segment":          form.get("segment") or "",
+            "dokumentkategori": form.get("dokumentkategori") or "",
             "oppsummering":     form.get("oppsummering") or "",
             "kilde_url":        form.get("kilde_url") or "",
             "kilde_type":       form.get("kilde_type") or "",
@@ -2792,6 +3252,7 @@ async def admin_update_entry():
 
     body = await request.get_json(force=True) or {}
 
+    updated = None
     with _doc_store_lock:
         data = _load_full_doc_store()
         entries = list(data.get(name, []))
@@ -2804,14 +3265,22 @@ async def admin_update_entry():
                 entries[i] = merged
                 data[name] = entries
                 _save_full_doc_store(data)
-                # Node metadata is baked in at ingest and is what /query filters
-                # on, so an edited title or segment is invisible until the
-                # document is read again. Clearing the manifest key schedules
-                # that re-read; the build replaces the old nodes rather than
-                # adding to them.
-                purge = _forget_ingested_key(name, e)
-                return jsonify({"ok": True, "entry": merged, "purged": purge})
-    return jsonify({"error": "Entry not found"}), 404
+                updated = merged
+                break
+    if updated is None:
+        return jsonify({"error": "Entry not found"}), 404
+
+    # The edit changed labels, not text: the loaded index only needs its copy of
+    # them rewritten, which takes effect at once. No re-reading, no embeddings,
+    # and the document stays built. An index not loaded here picks the labels up
+    # when it loads.
+    nodes = 0
+    holder = _indexes.get(name)
+    if holder:
+        loop = asyncio.get_event_loop()
+        nodes = await loop.run_in_executor(
+            None, _refresh_index_metadata, name, holder["index"], [updated])
+    return jsonify({"ok": True, "entry": updated, "nodes_updated": nodes})
 
 
 @app.delete("/admin/entries")
@@ -2949,6 +3418,7 @@ def _run_reindex_job(job_id: str, name: str, loop: asyncio.AbstractEventLoop, mo
             idx = load_index_from_storage(ctx)
             local_store = os.path.join(persist_dir, "document_store.json")
             doc_store_path = local_store if os.path.isfile(local_store) else DOCUMENT_STORE_PATH
+            _refresh_loaded_index(name, idx, doc_store_path)
             _indexes[name] = {"index": idx, "doc_store_path": doc_store_path}
             # Refresh readiness so a reindex can recover a previously-failed index.
             if name not in _readiness["expected"]:

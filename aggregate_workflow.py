@@ -238,6 +238,35 @@ Lag en syntese på tvers (longlist) som beskrevet.""",
 
         "default_question": "Hvilke strategiske drivere, sårbarheter, konsekvenser og risikoer fremgår av dokumentet?",
         "output_key": "risikoomrader",
+
+        # The JSON above, restated as data. The nodes read this rather than the
+        # key names, so a template built in the wizard runs the same code path.
+        "doc_notes": [
+            {"key": "relevans", "label": "Relevans", "lead": True},
+            {"key": "kildegrunnlag_styrke", "label": "Kildegrunnlagets styrke"},
+        ],
+        "doc_fields": [
+            {"key": "kildefunn",    "label": "Kildefunn"},
+            {"key": "drivere",      "label": "Drivere"},
+            {"key": "sarbarheter",  "label": "Mulige sårbarheter"},
+            {"key": "konsekvenser", "label": "Mulige konsekvenser"},
+            {"key": "risikoer",     "label": "Foreløpige risikoer", "tone": "danger"},
+            # Questions are for the reader, not for the synthesis to merge.
+            {"key": "avklaringssporsmal", "label": "Avklaringsspørsmål", "context": False},
+        ],
+        "agg_items_key": "temaer",
+        "agg_items_label": "risikoområder",
+        "agg_item_fields": [
+            {"key": "drivere",      "label": "Drivere"},
+            {"key": "sarbarheter",  "label": "Sårbarheter"},
+            {"key": "konsekvenser", "label": "Konsekvenser"},
+            {"key": "risikoer",     "label": "Risikoer", "tone": "danger"},
+        ],
+        "agg_top_fields": [
+            {"key": "monstre", "label": "Overordnede mønstre", "lead": True},
+            {"key": "usikkerhet_kunnskapshull",  "label": "Usikkerhet og kunnskapshull"},
+            {"key": "sporsmal_til_ledergruppen", "label": "Spørsmål til ledergruppen"},
+        ],
     },
 
     # WHO-kode compliance: regelverkssjekk mot WHO-koden (International Code of
@@ -282,6 +311,45 @@ Gi ett tydelig compliance-svar på spørsmålet i JSON-formatet som beskrevet.""
         "output_key": "findings",
     },
 }
+
+
+# ── Reading a structured template's shape ─────────────────────────────────────
+# A "structured" query type asks each document for a JSON object rather than a
+# bullet list, and asks the synthesis for one too. Which keys those objects hold
+# is declared in the config — `doc_fields`, `doc_notes`, `agg_item_fields`,
+# `agg_top_fields` — so the nodes below never name a key of their own. Strategisk
+# risiko declares its chain that way, and a template built in the wizard declares
+# whatever its author asked for; both run this same code.
+
+def _spec_fields(cfg: Any, key: str) -> list[dict]:
+    """The declared fields under `key`, skipping anything without a JSON key."""
+    raw = (cfg or {}).get(key) or []
+    return [f for f in raw if isinstance(f, dict) and (f.get("key") or "").strip()]
+
+
+def _context_fields(cfg: Any) -> list[dict]:
+    """Per-document fields that count as a contribution and are handed to the
+    synthesis. `context: False` keeps a field in the report but out of both —
+    open questions, for instance, are for the reader, not for merging."""
+    return [f for f in _spec_fields(cfg, "doc_fields") if f.get("context", True)]
+
+
+def _flat_finding_keys(cfg: Any) -> list[str]:
+    """Which per-document fields stand in for the document in a flat list, in
+    order of preference: the declared order, so the top field — what the
+    document was read for — wins, and the next one with content fills in when
+    it is empty. The same field the views show under a finding."""
+    explicit = [k for k in ((cfg or {}).get("flat_from") or []) if isinstance(k, str)]
+    if explicit:
+        return explicit
+    return [f["key"] for f in _spec_fields(cfg, "doc_fields")]
+
+
+def _agg_items_key(cfg: Any) -> str:
+    """Where the synthesis puts its list of findings."""
+    return ((cfg or {}).get("agg_items_key") or "").strip() or (
+        "temaer" if (cfg or {}).get("structured") else "items"
+    )
 
 
 # ── Output language ───────────────────────────────────────────────────────────
@@ -592,12 +660,14 @@ def extract_per_document(state: AggregateState) -> dict:
             if not structured or structured.get("relevant") is False:
                 print(f"  ↳ Not relevant — skipping", flush=True)
                 return doc_idx, None
-            # Flat list (risks first, else kildefunn) for backward-compatible summaries.
-            findings = list(structured.get("risikoer") or []) or list(structured.get("kildefunn") or [])
-            has_content = any(
-                structured.get(k)
-                for k in ("kildefunn", "drivere", "sarbarheter", "konsekvenser", "risikoer")
-            )
+            # Flat list for the summaries that show one line per document —
+            # the template says which field speaks for the document.
+            findings = []
+            for flat_key in _flat_finding_keys(cfg):
+                findings = [str(v) for v in (structured.get(flat_key) or []) if str(v).strip()]
+                if findings:
+                    break
+            has_content = any(structured.get(f["key"]) for f in _context_fields(cfg))
         else:
             if "INGEN RELEVANTE FUNN" in raw.upper():
                 print(f"  ↳ No relevant findings", flush=True)
@@ -740,20 +810,15 @@ def aggregate_findings(state: AggregateState) -> dict:
             cfg["output_key"]: [],
         }}
 
-    _RISK_KEYS = (
-        ("kildefunn", "Kildefunn"), ("drivere", "Drivere"),
-        ("sarbarheter", "Sårbarheter"), ("konsekvenser", "Konsekvenser"),
-        ("risikoer", "Risikoer"),
-    )
-
     all_findings_text = ""
     for doc in per_doc:
         all_findings_text += f"\n\n### {doc.tittel}\n"
         if structured and doc.structured:
-            for key, lbl in _RISK_KEYS:
-                vals = doc.structured.get(key) or []
+            for field in _context_fields(cfg):
+                vals = doc.structured.get(field["key"]) or []
                 if vals:
-                    all_findings_text += f"{lbl}:\n" + "".join(f"- {v}\n" for v in vals)
+                    label = field.get("label") or field["key"]
+                    all_findings_text += f"{label}:\n" + "".join(f"- {v}\n" for v in vals)
         else:
             for f in doc.findings:
                 all_findings_text += f"- {f}\n"
@@ -776,7 +841,7 @@ def aggregate_findings(state: AggregateState) -> dict:
         raw = (response.content or "").strip()
         print(f"[aggregate] Aggregation LLM response ({len(raw)} chars): {raw[:200]!r}", flush=True)
         parsed = _parse_json_block(raw)
-        items = parsed.get("temaer", []) if structured else parsed.get("items", [])
+        items = parsed.get(_agg_items_key(cfg), [])
         print(f"[aggregate] Parsed {len(items)} items from aggregation", flush=True)
     except Exception as e:
         print(f"[aggregate] AGGREGATION ERROR: {e}", flush=True)
@@ -820,10 +885,9 @@ def aggregate_findings(state: AggregateState) -> dict:
         cfg["output_key"]: items,
     }
     if structured:
-        # Syntese-level fields that aren't per-tema (longlist context).
-        result["monstre"] = parsed.get("monstre", [])
-        result["usikkerhet_kunnskapshull"] = parsed.get("usikkerhet_kunnskapshull", [])
-        result["sporsmal_til_ledergruppen"] = parsed.get("sporsmal_til_ledergruppen", [])
+        # Syntese-level fields that aren't per-item — the context around the list.
+        for field in _spec_fields(cfg, "agg_top_fields"):
+            result[field["key"]] = parsed.get(field["key"], [])
     return {"result": result}
 
 

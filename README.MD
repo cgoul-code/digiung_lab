@@ -67,8 +67,52 @@ som faktisk avviker — i `query_type_prompts.json`:
 query_type_prompts.json                                  # blob-rot (kun i Azure)
 ```
 
-De strukturelle feltene (`output_key`, `structured`) kan **ikke** endres — de er
-bundet til koden og rapport-/klientrendringen.
+For de innebygde malene kan de strukturelle feltene (`output_key`, `structured`)
+**ikke** endres — de er bundet til koden. Egne maler bygget i veiviseren setter
+dem selv; se neste avsnitt.
+
+## Analysemaler fra veiviseren
+
+En strukturert mal spør hvert dokument om et JSON-objekt og oppsummeringen om et
+annet, i stedet for punktlister. Hvilke nøkler de objektene har er **data**, ikke
+kode: malen deklarerer dem, og både workflow, klient og .docx-rapport leser
+deklarasjonen. `strategisk_risiko` deklarerer analysekjeden sin på samme måte,
+så innebygde og egendefinerte maler kjører samme kodevei.
+
+Feltene i en malkonfigurasjon:
+
+| felt | betyr |
+| --- | --- |
+| `structured` | svarene er JSON-objekter, ikke punktlister |
+| `doc_fields` | listefeltene i dokumentsvaret, `[{key, label, beskrivelse}]` |
+| `doc_notes` | enkeltverdi-feltene i dokumentsvaret (relevansvurdering o.l.) |
+| `agg_items_key` | nøkkelen syntesen legger funnene under (veiviseren: `temaer`) |
+| `agg_items_label` | hva ett funn heter i opptellingen («12 risikoområder») |
+| `agg_item_fields` | listefeltene inne i hvert funn |
+| `agg_top_fields` | listefeltene på tvers av funnene |
+| `wizard` | svarene malen ble skrevet av, så den kan åpnes i veiviseren igjen |
+
+Flagg på et felt: `lead` (vises før listen, ikke etter — i veiviseren bestemt av
+om feltet står over eller under raden for listen), `context: false` (blir stående i
+analysen per dokument, men sendes ikke til oppsummeringen), `tone` (strekfarge i
+margen: `"#rrggbb"`, eller `"danger"` for rødt). Det øverste feltet i `doc_fields`
+står for dokumentet der bare én liste får plass.
+
+### Slik virker veiviseren
+
+Promptene **skrives av svarene** på serveren, ikke av brukeren:
+
+- `POST /admin/query-types/compose` med `{wizard: {...}}` returnerer de fire
+  promptene uten å lagre noe — det er forhåndsvisningen i klienten.
+- `POST /admin/query-types` og `PUT /admin/query-types/<qt>` med `wizard` i
+  kroppen lagrer malen: samme komposisjon, pluss deklarasjonen over. Teksten man
+  godkjenner i forhåndsvisningen er derfor teksten analysen kjører på.
+- Brukerskrevet tekst får klammeparentesene doblet automatisk i
+  `aggregate_system`, siden den går gjennom `.format()` før den sendes. Et
+  JSON-eksempel i en instruksjon er noe modellen skal se, ikke en plassholder.
+
+Egne maler lagres hele i `custom_query_types.json` (`CUSTOM_QT_STORE_PATH`), og
+speiles til blob som de andre lagrene.
 
 ### Slik virker det
 
@@ -86,6 +130,9 @@ bundet til koden og rapport-/klientrendringen.
   `.format()` ved kjøring. (Det er foreløpig ingen server-side validering av dette.)
 
 I klienten finnes editoren under **Avansert → «Rediger prompts»** i aggregate-modus.
+Nye maler lages under **Administrer analysemaler**: «Ny analysemal (veiviser)»
+bygger en strukturert mal, «Enkel mal» to instruksjoner skrevet for hånd. En mal
+laget i veiviseren åpnes i veiviseren igjen når man trykker «Rediger».
 
 ### Lokal vs. Azure-lagring
 

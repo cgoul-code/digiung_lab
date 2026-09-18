@@ -345,11 +345,18 @@ def _apply_entry_metadata(doc: Document, entry: dict, source: str, filename: str
     doc.metadata["malgruppe"]         = entry.get("malgruppe") or ""
     doc.metadata["antall_deltakere"]  = entry.get("antall_deltakere") or ""
     doc.metadata["segment"]           = entry.get("segment") or ""
+    doc.metadata["dokumentkategori"]  = entry.get("dokumentkategori") or ""
     doc.metadata["oppsummering"]      = entry.get("oppsummering") or ""
     doc.metadata["kilde_url"]         = entry.get("kilde_url") or ""
     # For materialized sources: "pdf" (kilde_url is the real PDF → #page links)
     # or "html" (kilde_url is a web page → text-fragment links). Empty otherwise.
     doc.metadata["kilde_type"]        = entry.get("kilde_type") or ""
+    # Administrative only: it says how the document is filed, not what it says,
+    # so it must not colour the embedding. The nodes inherit this from the
+    # document when it is split.
+    doc.excluded_embed_metadata_keys = sorted(
+        set(doc.excluded_embed_metadata_keys) | {"dokumentkategori"}
+    )
 
 
 def _http_get(url: str) -> str:
