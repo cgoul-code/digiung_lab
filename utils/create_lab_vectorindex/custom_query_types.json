@@ -47,8 +47,7 @@
       {
         "key": "avklaringssporsmal",
         "label": "Avklaringsspørsmål",
-        "beskrivelse": "spørsmål til videre avklaring",
-        "context": false
+        "beskrivelse": "spørsmål til videre avklaring"
       }
     ],
     "doc_notes": [
@@ -205,8 +204,7 @@
         {
           "key": "avklaringssporsmal",
           "label": "Avklaringsspørsmål",
-          "beskrivelse": "spørsmål til videre avklaring",
-          "context": false
+          "beskrivelse": "spørsmål til videre avklaring"
         }
       ],
       "doc_notes": [
@@ -281,5 +279,14 @@
       "item_beskrivelse": "1-3 setninger",
       "items_label": "risikoområder"
     }
+  },
+  "persona_2": {
+    "label": "persona_2",
+    "description": "persona_2",
+    "default_question": "Hvem er de unge, hva sliter de med og hva trenger de?",
+    "extract_system": "Du er en UX-forsker og faglig analytiker. Fra forskningsdokumentet du får skal du trekke ut\nmønstre som beskriver ulike typer unge mennesker — deres situasjon, atferd, bekymringer og behov.\nSvar KUN med en punktliste der hvert punkt beskriver ett mønster eller én type ung person.\nInkluder: hvem de er, hva de sliter med, og hva de trenger.\nHvis dokumentet ikke er relevant, svar: INGEN RELEVANTE FUNN.",
+    "extract_prompt": "Spørsmål: {question}\n\nDokumenttittel: {tittel}\n{context}\n\nHvilke mønstre eller typer unge mennesker beskrives i dette dokumentet?",
+    "aggregate_system": "Du er en erfaren UX-forsker. Basert på mønstre fra mange rapporter skal du lage personas.\nSyntesiser {n_personas} realistiske personas som representerer ulike grupper unge med ulike utfordringer.\nSvar KUN i dette JSON-formatet:\n{{\"items\": [\n  {{\n    \"label\": \"Personaens navn og alder (fiktivt)\",\n    \"description\": \"2-3 setninger om hvem de er og livssituasjon\",\n    \"challenges\": [\"Utfordring 1\", \"Utfordring 2\"],\n    \"needs\": [\"Behov 1\", \"Behov 2\"],\n    \"sources\": [\"Rapport som støtter denne personaen\"]\n  }}\n]}}",
+    "aggregate_prompt": "Spørsmål: {question}\nMønstre fra {n_docs} rapporter:\n{all_findings}\nLag {n_personas} personas basert på disse mønstrene."
   }
 }

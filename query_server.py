@@ -2107,6 +2107,21 @@ def _suggest_query_type(label: str, description: str) -> dict:
     return out
 
 
+def _query_type_locked(qt: str) -> str:
+    """Why this analysemal can't be changed — empty when it can.
+
+    Compiled templates are part of the product. A custom one moved to «innebygd»
+    is part of the standard set the same way; moving it back is the way in.
+    """
+    if qt in QUERY_TYPES:
+        return "Innebygde analysemaler kan ikke redigeres eller slettes."
+    cfg = (_load_custom_query_types() or {}).get(qt)
+    if isinstance(cfg, dict) and cfg.get("builtin"):
+        return ("Malen er flyttet til de innebygde. Gjør den om til egen mal "
+                "igjen for å endre eller slette den.")
+    return ""
+
+
 def _safe_qt_key(key: str) -> str:
     if not key or not re.fullmatch(r"[a-z0-9_]{2,40}", key):
         raise ValueError(
@@ -2779,11 +2794,20 @@ async def admin_list_query_types():
     Labels for the built-ins live in the client, so they are reported as-is and
     only custom types carry one here."""
     eff = _effective_query_types()
+    overrides = _load_prompt_overrides()
     out = []
     for qt, cfg in eff.items():
+        # «Innebygd» covers both the compiled templates and the ones moved here,
+        # since they behave the same: offered as standard, and read-only.
+        builtin = qt in QUERY_TYPES or bool(cfg.get("builtin"))
         out.append({
             "key":              qt,
             "custom":           bool(cfg.get("custom")),
+            "builtin":          builtin,
+            "editable":         not builtin,
+            # A built-in edited before they were locked can still be put back to
+            # the text the code ships with.
+            "has_override":     bool(overrides.get(qt)),
             "label":            cfg.get("label") or "",
             "description":      cfg.get("description") or "",
             "default_question": cfg.get("default_question") or "",
@@ -2794,7 +2818,8 @@ async def admin_list_query_types():
             "structured":       bool(cfg.get("structured")),
             "wizard":           cfg.get("wizard") or None,
         })
-    out.sort(key=lambda r: (r["custom"], r["key"]))
+    # Standard templates first, then the ones still being worked on.
+    out.sort(key=lambda r: (r["editable"], r["key"]))
     return jsonify({"query_types": out})
 
 
@@ -2899,65 +2924,81 @@ async def admin_create_query_type():
 
 @app.put("/admin/query-types/<qt>")
 async def admin_update_query_type(qt):
-    """Save edited prompt text for a query type. Only fields that differ from the
-    built-in default are persisted; an empty/default value clears that override.
+    """Save an edited analysemal. Only a template made here can be written — a
+    built-in is part of the product, and is read-only."""
+    locked = _query_type_locked(qt)
+    if locked:
+        return jsonify({"error": locked}), 403
 
-    Custom types have no built-in to differ from, so they are written whole."""
     body = await request.get_json(force=True) or {}
 
-    if qt not in QUERY_TYPES:
-        with _custom_qt_lock:
-            custom = _load_custom_query_types()
-            if qt not in custom:
-                return jsonify({"error": f"Unknown query_type: {qt}"}), 404
-            cfg = dict(custom[qt])
-            for f in CUSTOM_QT_TEXT_FIELDS:
-                v = body.get(f)
-                if isinstance(v, str):
-                    cfg[f] = v
-            # Reopened in the wizard: the answers are the source, so both the
-            # prompts and the JSON shape are rewritten from them.
-            if body.get("wizard"):
-                try:
-                    cfg.update(_wizard_config(_clean_wizard_spec(body["wizard"])))
-                except ValueError as e:
-                    return jsonify({"error": str(e)}), 400
-            missing = [f for f in CUSTOM_QT_REQUIRED if not (cfg.get(f) or "").strip()]
-            if missing:
-                return jsonify({"error": f"Mangler: {', '.join(missing)}"}), 400
+    with _custom_qt_lock:
+        custom = _load_custom_query_types()
+        if qt not in custom:
+            return jsonify({"error": f"Unknown query_type: {qt}"}), 404
+        cfg = dict(custom[qt])
+        for f in CUSTOM_QT_TEXT_FIELDS:
+            v = body.get(f)
+            if isinstance(v, str):
+                cfg[f] = v
+        # Reopened in the wizard: the answers are the source, so both the
+        # prompts and the JSON shape are rewritten from them.
+        if body.get("wizard"):
             try:
-                _check_aggregate_prompt(cfg.get("aggregate_system"))
+                cfg.update(_wizard_config(_clean_wizard_spec(body["wizard"])))
             except ValueError as e:
                 return jsonify({"error": str(e)}), 400
-            custom[qt] = cfg
-            _save_custom_query_types(custom)
-        return jsonify({"ok": True, "query_type": qt, "effective": _effective_cfg(qt)})
-
-    incoming = {k: body[k] for k in EDITABLE_PROMPT_FIELDS if isinstance(body.get(k), str)}
-    if not incoming:
-        return jsonify({"error": "No editable prompt fields in body"}), 400
-
-    with _prompts_lock:
-        data = _load_prompt_overrides()
-        current = dict(data.get(qt) or {})
-        for field, value in incoming.items():
-            if value.strip() and value != QUERY_TYPES[qt].get(field):
-                current[field] = value
-            else:
-                current.pop(field, None)  # matches default → drop the override
-        if current:
-            data[qt] = current
-        else:
-            data.pop(qt, None)
-        _save_prompt_overrides(data)
-
+        missing = [f for f in CUSTOM_QT_REQUIRED if not (cfg.get(f) or "").strip()]
+        if missing:
+            return jsonify({"error": f"Mangler: {', '.join(missing)}"}), 400
+        try:
+            _check_aggregate_prompt(cfg.get("aggregate_system"))
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        custom[qt] = cfg
+        _save_custom_query_types(custom)
     return jsonify({"ok": True, "query_type": qt, "effective": _effective_cfg(qt)})
+
+
+@app.post("/admin/query-types/<qt>/builtin")
+async def admin_set_query_type_builtin(qt):
+    """Move a template into the standard set, or back out of it.
+
+    An innebygd template is offered like the compiled ones and is read-only, so
+    what a team relies on stops moving. The move back is the only way to edit it
+    again — nothing here is one-way.
+    """
+    body = await request.get_json(force=True) or {}
+    want = bool(body.get("builtin", True))
+
+    if qt in QUERY_TYPES:
+        return jsonify({"error": f"«{qt}» er allerede en innebygd analysemal."}), 400
+
+    with _custom_qt_lock:
+        custom = _load_custom_query_types()
+        if qt not in custom:
+            return jsonify({"error": f"Ukjent analysemal: {qt}"}), 404
+        cfg = dict(custom[qt])
+        if want:
+            cfg["builtin"] = True
+        else:
+            cfg.pop("builtin", None)
+        custom[qt] = cfg
+        _save_custom_query_types(custom)
+
+    return jsonify({"ok": True, "query_type": qt, "builtin": want})
 
 
 @app.delete("/admin/query-types/<qt>")
 async def admin_reset_query_type(qt):
-    """Reset a query type's prompts to the built-in defaults."""
+    """Delete a template made here, or clear an older edit of a built-in.
+
+    A built-in has the shipped text to fall back to, so this restores it. One
+    moved to «innebygd» has no such default and is locked: move it back first."""
     if qt not in QUERY_TYPES:
+        locked = _query_type_locked(qt)
+        if locked:
+            return jsonify({"error": locked}), 403
         # Custom types have no default to fall back to — deleting means removing.
         with _custom_qt_lock:
             custom = _load_custom_query_types()
