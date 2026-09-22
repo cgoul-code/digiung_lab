@@ -3025,6 +3025,68 @@ async def admin_reset_query_type(qt):
     return jsonify({"ok": True, "query_type": qt, "reset": existed, "effective": _effective_cfg(qt)})
 
 
+def _pages_per_entry(idx, entries: list[dict]) -> dict:
+    """The highest page number each entry's nodes mention, by admin key.
+
+    One pass over the nodes, which are already in memory — the same walk the
+    metadata refresh makes, and cheap enough to do on request.
+    """
+    by_key = {}
+    for entry in entries:
+        admin_key = _entry_admin_key(entry)
+        if not admin_key:
+            continue
+        for k in _entry_node_keys(entry):
+            by_key[k] = admin_key
+
+    out: dict[str, int] = {}
+    if not by_key:
+        return out
+    for node in idx.storage_context.docstore.docs.values():
+        meta = node.metadata or {}
+        admin_key = next((by_key[k] for k in _node_keys(meta) if k in by_key), None)
+        if admin_key is None:
+            continue
+        try:
+            page = int(str(meta.get("page_label") or meta.get("page") or "").strip())
+        except (TypeError, ValueError):
+            continue
+        if page > out.get(admin_key, 0):
+            out[admin_key] = page
+    return out
+
+
+@app.get("/admin/entries/stats")
+async def admin_entry_stats():
+    """Pages per document in one dokumentbank, for the admin list's summary.
+
+    Keyed the way the list keys its rows, so a filtered list can add up only
+    what it shows."""
+    name = request.args.get("index_name", "")
+    try:
+        _safe_index_name(name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    with _doc_store_lock:
+        data = _load_full_doc_store()
+        entries = list(data.get(name, []))
+
+    pages: dict = {}
+    holder = _indexes.get(name)
+    if holder and entries:
+        loop = asyncio.get_event_loop()
+        pages = await loop.run_in_executor(None, _pages_per_entry, holder["index"], entries)
+
+    return jsonify({
+        "index_name": name,
+        "documents": len(entries),
+        "pages": pages,
+        # False when the bank isn't loaded here: no counts, rather than zeroes.
+        "index_loaded": bool(holder),
+    })
+
+
 @app.get("/admin/entries")
 async def admin_list_entries():
     name = request.args.get("index_name", "")

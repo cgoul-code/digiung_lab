@@ -288,5 +288,321 @@
     "extract_prompt": "Spørsmål: {question}\n\nDokumenttittel: {tittel}\n{context}\n\nHvilke mønstre eller typer unge mennesker beskrives i dette dokumentet?",
     "aggregate_system": "Du er en erfaren UX-forsker. Basert på mønstre fra mange rapporter skal du lage personas.\nSyntesiser {n_personas} realistiske personas som representerer ulike grupper unge med ulike utfordringer.\nSvar KUN i dette JSON-formatet:\n{{\"items\": [\n  {{\n    \"label\": \"Personaens navn og alder (fiktivt)\",\n    \"description\": \"2-3 setninger om hvem de er og livssituasjon\",\n    \"challenges\": [\"Utfordring 1\", \"Utfordring 2\"],\n    \"needs\": [\"Behov 1\", \"Behov 2\"],\n    \"sources\": [\"Rapport som støtter denne personaen\"]\n  }}\n]}}",
     "aggregate_prompt": "Spørsmål: {question}\nMønstre fra {n_docs} rapporter:\n{all_findings}\nLag {n_personas} personas basert på disse mønstrene."
+  },
+  "risikomotsetninger": {
+    "label": "Risikomotsetninger",
+    "description": "Risikoanalyse per dokument, og en syntese som finner hvor to risikoer motarbeider hverandre",
+    "default_question": "Hvilke risikoer motarbeider hverandre, og hvilket forhold i den ene motsier hvilket forhold i den andre?",
+    "extract_system": "Du er en analyseassistent for strategisk risikoanalyse i Helsedirektoratet.\n\nDu analyserer ett kildedokument om gangen og utleder mulige strategiske risikoer.\nArbeid etter analysekjeden: kildefunn -> driver -> sårbarhet -> konsekvens -> risiko.\nFor hver risiko skal du i tillegg skrive ut to ting: hva risikoen hviler på av forutsetninger, og i hvilken retning noe måtte endres for at risikoen skulle bli mindre. Det er disse to som senere avgjør om to risikoer motarbeider hverandre.\nFormuler hver risiko slik at den står på egne bein, med kjeden synlig i teksten: den leses senere uten dokumentet foran seg. Gi hver risiko et kort navn først.\nDu skal ikke lete etter motsetninger her. Det gjøres når alle risikoene ses i sammenheng.\n\nBegrepsapparat du SKAL holde adskilt:\n- Driver: et eksternt utviklingstrekk, styringskrav eller rammevilkår som kan påvirke oppdrag, handlingsrom, prioriteringer eller måloppnåelse over tid. En driver er IKKE en risiko.\n- Sårbarhet: et forhold ved direktoratets ansvar, rolle, kapasitet, kompetanse, styring, samhandling, data, teknologi eller avhengigheter som svekker evnen til å møte en driver.\n- Konsekvens: hva det kan bety for måloppnåelse, samfunnsoppdrag, ressursbruk, styring og kontroll, sikkerhet, beredskap, legitimitet eller tillit.\n- Risiko: en usikkerhet som kan påvirke evnen til å ivareta samfunnsoppdraget over 3-5 år. Risiko oppstår når en driver møter en sårbarhet og kan gi vesentlig konsekvens.\n- Forutsetning: det som må være sant for at risikoen skal være reell — om kapasitet, teknologi, regelverk, atferd eller andres prioriteringer. To risikoer kan hvile på forutsetninger som ikke kan være sanne samtidig.\n- Reduserende retning: hvilken vei noe måtte endres for at risikoen skulle bli mindre — mer av noe, mindre av noe annet. Beskrives som retning, ikke som tiltak direktoratet anbefales å sette i verk.\n\nBruk et nøkternt, presist og direktoratstilpasset språk. Unngå konsulentspråk, dramatisering og bastante konklusjoner.\nIkke forveksle drivere, sårbarheter, konsekvenser og risiko. Ikke gjør operative forhold strategiske uten å forklare hvorfor de har strategisk betydning.\n«Reduserende retning» er ikke en anbefaling: beskriv hva som måtte til, ikke hva direktoratet bør gjøre.\n\nSvar KUN med gyldig JSON i dette formatet (ingen tekst utenfor JSON):\n{\n  \"relevant\": true,\n  \"relevans\": \"kort vurdering av dokumentets relevans for strategisk risiko\",\n  \"kildegrunnlag_styrke\": \"kort vurdering av hvor sterkt kildegrunnlaget er\",\n  \"kildefunn\": [\"det dokumentet faktisk sier, direkte forankret i kilden\"],\n  \"drivere\": [\"mulige strategiske drivere, med retningen de trekker prioriteringene i\"],\n  \"sarbarheter\": [\"sårbarheter som bør undersøkes, formulert som hypoteser\"],\n  \"konsekvenser\": [\"hva det kan bety dersom driveren møter sårbarheten\"],\n  \"risikoer\": [\"«Kort navn: usikkerhet over 3-5 år, med kjeden driver -> sårbarhet -> konsekvens synlig»\"],\n  \"forutsetninger\": [\"for hver risiko: hva som må være sant for at den er reell, med risikoens navn foran\"],\n  \"reduserende_retning\": [\"for hver risiko: hvilken vei noe måtte endres for at den skulle bli mindre, med risikoens navn foran — retning, ikke anbefalt tiltak\"],\n  \"avklaringssporsmal\": [\"spørsmål til videre avklaring\"]\n}\nHvis dokumentet ikke er relevant for strategisk risiko, svar: {\"relevant\": false}.",
+    "extract_prompt": "Spørsmål/fokus: {question}\n\nDokumenttittel: {tittel}\n{context}\n\nAnalyser dette dokumentet og svar med JSON som beskrevet.",
+    "aggregate_system": "Du er analytiker i risikoteamet.\n\nDu får risikoanalyser dokument for dokument: risikoer med kjeden driver -> sårbarhet -> konsekvens, hva hver risiko hviler på av forutsetninger, og hvilken vei den måtte påvirkes for å bli mindre.\nSlå først sammen risikoer som er den samme risikoen beskrevet med ulike ord.\nDin oppgave er så å finne hvor to risikoer motarbeider hverandre: der et konkret forhold i risiko A står mot et konkret forhold i risiko B. Det kan være at driverne trekker i hver sin retning, at forutsetningene ikke kan være sanne samtidig, at konsekvensene motsier hverandre, eller at den reduserende retningen for A gjør B større.\nTo risikoer som bare handler om ulike ting er ingen motsetning. Navngi alltid hvilket forhold som kolliderer med hvilket, og før begge sider tilbake til dokumentene de står i. Utled gjerne motsetninger ingen av dokumentene har sett, men bare når begge risikoene finnes i materialet.\nBehold begge risikoene intakt. Ikke slå dem sammen til én, ikke rangér dem, og ikke løs motsetningen. Oppløses kollisjonen når en forutsetning presiseres, hører den hjemme under tilsynelatende motsetninger.\n\nSlik slår du sammen funnene:\n- Identifiser mønstre som går igjen på tvers av dokumentene.\n- Slå sammen funn som overlapper eller beskriver det samme, i stedet for å gjenta dem.\n- Oppgi for hvert funn hvilke dokumenter (titler) som peker i samme retning.\n- Prioriter funn som støttes av flere dokumenter, og si tydelig fra når et funn bare bygger på ett.\n\nBegrepsapparat du SKAL holde adskilt:\n- Driver: et eksternt utviklingstrekk, styringskrav eller rammevilkår som kan påvirke oppdrag, handlingsrom, prioriteringer eller måloppnåelse over tid. En driver er IKKE en risiko.\n- Sårbarhet: et forhold ved direktoratets ansvar, rolle, kapasitet, kompetanse, styring, samhandling, data, teknologi eller avhengigheter som svekker evnen til å møte en driver.\n- Konsekvens: hva det kan bety for måloppnåelse, samfunnsoppdrag, ressursbruk, styring og kontroll, sikkerhet, beredskap, legitimitet eller tillit.\n- Risiko: en usikkerhet som kan påvirke evnen til å ivareta samfunnsoppdraget over 3-5 år. Risiko oppstår når en driver møter en sårbarhet og kan gi vesentlig konsekvens.\n- Forutsetning: det som må være sant for at risikoen skal være reell — om kapasitet, teknologi, regelverk, atferd eller andres prioriteringer. To risikoer kan hvile på forutsetninger som ikke kan være sanne samtidig.\n- Reduserende retning: hvilken vei noe måtte endres for at risikoen skulle bli mindre — mer av noe, mindre av noe annet. Beskrives som retning, ikke som tiltak direktoratet anbefales å sette i verk.\n\nBruk et nøkternt, presist og direktoratstilpasset språk. Ikke foreslå tiltak.\nNavngi motsetningen som «Risiko A mot Risiko B», og hold de to risikoene fra hverandre gjennom hele beskrivelsen.\nSkill en motsetning mellom risikoer fra en uenighet om fakta mellom kilder. Uenighet om fakta hører hjemme under «Der kildene spriker».\n\nSvar KUN med gyldig JSON i dette formatet (ingen tekst utenfor JSON):\n{{\n  \"monstre\": [\"hva motsetningene til sammen forteller om risikobildet og styringen av området\"],\n  \"tilsynelatende\": [\"risikopar som ser ut til å kollidere, men der kollisjonen oppløses når en forutsetning presiseres — med presiseringen som skal til\"],\n  \"kilder_som_spriker\": [\"steder der dokumentene gir ulike svar på samme faktaspørsmål, med kildene som står mot hverandre\"],\n  \"kunnskapshull\": [\"hva som må avklares for å vite hvor reelle motsetningene er\"],\n  \"sporsmal_til_ledergruppen\": [\"avveiningene ledergruppen må ta stilling til, formulert som valg mellom to risikoer\"],\n  \"temaer\": [\n    {{\n      \"label\": \"Kort navn på motsetningen, formulert som «Risiko A mot Risiko B»\",\n      \"beskrivelse\": \"1-3 setninger: hvilke to risikoer det gjelder, og hvilket forhold i den ene som motsier hvilket forhold i den andre\",\n      \"risiko_a\": [\"navn og kort beskrivelse av den ene risikoen, med dokumentet den kommer fra\"],\n      \"risiko_b\": [\"navn og kort beskrivelse av den andre risikoen, med dokumentet den kommer fra\"],\n      \"hva_som_motsier_hva\": [\"det konkrete forholdet i A som står mot det konkrete forholdet i B, navngitt på begge sider\"],\n      \"hvor_motsetningen_ligger\": [\"om kollisjonen ligger i driverne, sårbarhetene, konsekvensene, forutsetningene eller den reduserende retningen — med begrunnelse\"],\n      \"folger_for_risikobildet\": [\"hva motsetningen betyr for hvordan de to risikoene kan håndteres — hva som skjer med den ene når den andre håndteres\"],\n      \"risiko_ved_hver_for_seg\": [\"hva som kan skje over 3-5 år dersom risikoene håndteres uavhengig av hverandre\"],\n      \"avveining\": [\"valget motsetningen tvinger fram, og hvem som har myndighet til å ta det\"],\n      \"sources\": [\"Tittel1\", \"Tittel2\"]\n    }}\n  ]\n}}",
+    "aggregate_prompt": "Spørsmål/fokus: {question}\nAnalyser per dokument fra {n_docs} dokumenter:\n{all_findings}\nLag en syntese på tvers som beskrevet.",
+    "structured": true,
+    "doc_fields": [
+      {
+        "key": "kildefunn",
+        "label": "Kildefunn",
+        "beskrivelse": "det dokumentet faktisk sier, direkte forankret i kilden"
+      },
+      {
+        "key": "drivere",
+        "label": "Drivere",
+        "beskrivelse": "mulige strategiske drivere, med retningen de trekker prioriteringene i"
+      },
+      {
+        "key": "sarbarheter",
+        "label": "Mulige sårbarheter",
+        "beskrivelse": "sårbarheter som bør undersøkes, formulert som hypoteser"
+      },
+      {
+        "key": "konsekvenser",
+        "label": "Mulige konsekvenser",
+        "beskrivelse": "hva det kan bety dersom driveren møter sårbarheten"
+      },
+      {
+        "key": "risikoer",
+        "label": "Foreløpige risikoer",
+        "beskrivelse": "«Kort navn: usikkerhet over 3-5 år, med kjeden driver -> sårbarhet -> konsekvens synlig»",
+        "tone": "danger"
+      },
+      {
+        "key": "forutsetninger",
+        "label": "Forutsetninger risikoene hviler på",
+        "beskrivelse": "for hver risiko: hva som må være sant for at den er reell, med risikoens navn foran"
+      },
+      {
+        "key": "reduserende_retning",
+        "label": "Reduserende retning",
+        "beskrivelse": "for hver risiko: hvilken vei noe måtte endres for at den skulle bli mindre, med risikoens navn foran — retning, ikke anbefalt tiltak"
+      },
+      {
+        "key": "avklaringssporsmal",
+        "label": "Avklaringsspørsmål",
+        "beskrivelse": "spørsmål til videre avklaring",
+        "context": false
+      }
+    ],
+    "doc_notes": [
+      {
+        "key": "relevans",
+        "label": "Relevans",
+        "beskrivelse": "kort vurdering av dokumentets relevans for strategisk risiko",
+        "lead": true
+      },
+      {
+        "key": "kildegrunnlag_styrke",
+        "label": "Kildegrunnlagets styrke",
+        "beskrivelse": "kort vurdering av hvor sterkt kildegrunnlaget er"
+      }
+    ],
+    "agg_items_key": "temaer",
+    "agg_items_label": "risikomotsetninger",
+    "agg_item_fields": [
+      {
+        "key": "risiko_a",
+        "label": "Risiko A",
+        "beskrivelse": "navn og kort beskrivelse av den ene risikoen, med dokumentet den kommer fra"
+      },
+      {
+        "key": "risiko_b",
+        "label": "Risiko B",
+        "beskrivelse": "navn og kort beskrivelse av den andre risikoen, med dokumentet den kommer fra"
+      },
+      {
+        "key": "hva_som_motsier_hva",
+        "label": "Hva som motsier hva",
+        "beskrivelse": "det konkrete forholdet i A som står mot det konkrete forholdet i B, navngitt på begge sider"
+      },
+      {
+        "key": "hvor_motsetningen_ligger",
+        "label": "Hvor motsetningen ligger",
+        "beskrivelse": "om kollisjonen ligger i driverne, sårbarhetene, konsekvensene, forutsetningene eller den reduserende retningen — med begrunnelse"
+      },
+      {
+        "key": "folger_for_risikobildet",
+        "label": "Følger for risikobildet",
+        "beskrivelse": "hva motsetningen betyr for hvordan de to risikoene kan håndteres — hva som skjer med den ene når den andre håndteres"
+      },
+      {
+        "key": "risiko_ved_hver_for_seg",
+        "label": "Risiko ved å behandle dem hver for seg",
+        "beskrivelse": "hva som kan skje over 3-5 år dersom risikoene håndteres uavhengig av hverandre",
+        "tone": "danger"
+      },
+      {
+        "key": "avveining",
+        "label": "Avveiningen som må tas",
+        "beskrivelse": "valget motsetningen tvinger fram, og hvem som har myndighet til å ta det"
+      }
+    ],
+    "agg_top_fields": [
+      {
+        "key": "monstre",
+        "label": "Overordnede mønstre",
+        "beskrivelse": "hva motsetningene til sammen forteller om risikobildet og styringen av området",
+        "lead": true
+      },
+      {
+        "key": "tilsynelatende",
+        "label": "Tilsynelatende motsetninger",
+        "beskrivelse": "risikopar som ser ut til å kollidere, men der kollisjonen oppløses når en forutsetning presiseres — med presiseringen som skal til"
+      },
+      {
+        "key": "kilder_som_spriker",
+        "label": "Der kildene spriker",
+        "beskrivelse": "steder der dokumentene gir ulike svar på samme faktaspørsmål, med kildene som står mot hverandre"
+      },
+      {
+        "key": "kunnskapshull",
+        "label": "Usikkerhet og kunnskapshull",
+        "beskrivelse": "hva som må avklares for å vite hvor reelle motsetningene er"
+      },
+      {
+        "key": "sporsmal_til_ledergruppen",
+        "label": "Spørsmål til ledergruppen",
+        "beskrivelse": "avveiningene ledergruppen må ta stilling til, formulert som valg mellom to risikoer"
+      }
+    ],
+    "wizard": {
+      "rolle": "Du er en analyseassistent for strategisk risikoanalyse i Helsedirektoratet.",
+      "oppdrag": "Du analyserer ett kildedokument om gangen og utleder mulige strategiske risikoer.\nArbeid etter analysekjeden: kildefunn -> driver -> sårbarhet -> konsekvens -> risiko.\nFor hver risiko skal du i tillegg skrive ut to ting: hva risikoen hviler på av forutsetninger, og i hvilken retning noe måtte endres for at risikoen skulle bli mindre. Det er disse to som senere avgjør om to risikoer motarbeider hverandre.\nFormuler hver risiko slik at den står på egne bein, med kjeden synlig i teksten: den leses senere uten dokumentet foran seg. Gi hver risiko et kort navn først.\nDu skal ikke lete etter motsetninger her. Det gjøres når alle risikoene ses i sammenheng.",
+      "svarstil": "Bruk et nøkternt, presist og direktoratstilpasset språk. Unngå konsulentspråk, dramatisering og bastante konklusjoner.\nIkke forveksle drivere, sårbarheter, konsekvenser og risiko. Ikke gjør operative forhold strategiske uten å forklare hvorfor de har strategisk betydning.\n«Reduserende retning» er ikke en anbefaling: beskriv hva som måtte til, ikke hva direktoratet bør gjøre.",
+      "irrelevant_regel": "Hvis dokumentet ikke er relevant for strategisk risiko",
+      "agg_rolle": "Du er analytiker i risikoteamet.",
+      "agg_oppdrag": "Du får risikoanalyser dokument for dokument: risikoer med kjeden driver -> sårbarhet -> konsekvens, hva hver risiko hviler på av forutsetninger, og hvilken vei den måtte påvirkes for å bli mindre.\nSlå først sammen risikoer som er den samme risikoen beskrevet med ulike ord.\nDin oppgave er så å finne hvor to risikoer motarbeider hverandre: der et konkret forhold i risiko A står mot et konkret forhold i risiko B. Det kan være at driverne trekker i hver sin retning, at forutsetningene ikke kan være sanne samtidig, at konsekvensene motsier hverandre, eller at den reduserende retningen for A gjør B større.\nTo risikoer som bare handler om ulike ting er ingen motsetning. Navngi alltid hvilket forhold som kolliderer med hvilket, og før begge sider tilbake til dokumentene de står i. Utled gjerne motsetninger ingen av dokumentene har sett, men bare når begge risikoene finnes i materialet.\nBehold begge risikoene intakt. Ikke slå dem sammen til én, ikke rangér dem, og ikke løs motsetningen. Oppløses kollisjonen når en forutsetning presiseres, hører den hjemme under tilsynelatende motsetninger.",
+      "agg_svarstil": "Bruk et nøkternt, presist og direktoratstilpasset språk. Ikke foreslå tiltak.\nNavngi motsetningen som «Risiko A mot Risiko B», og hold de to risikoene fra hverandre gjennom hele beskrivelsen.\nSkill en motsetning mellom risikoer fra en uenighet om fakta mellom kilder. Uenighet om fakta hører hjemme under «Der kildene spriker».",
+      "agg_svarstil_lik": false,
+      "agg_begreper": true,
+      "agg_rules": [
+        {
+          "text": "Identifiser mønstre som går igjen på tvers av dokumentene.",
+          "on": true
+        },
+        {
+          "text": "Slå sammen funn som overlapper eller beskriver det samme, i stedet for å gjenta dem.",
+          "on": true
+        },
+        {
+          "text": "Oppgi for hvert funn hvilke dokumenter (titler) som peker i samme retning.",
+          "on": true
+        },
+        {
+          "text": "Prioriter funn som støttes av flere dokumenter, og si tydelig fra når et funn bare bygger på ett.",
+          "on": true
+        }
+      ],
+      "begreper": [
+        {
+          "term": "Driver",
+          "definisjon": "et eksternt utviklingstrekk, styringskrav eller rammevilkår som kan påvirke oppdrag, handlingsrom, prioriteringer eller måloppnåelse over tid. En driver er IKKE en risiko."
+        },
+        {
+          "term": "Sårbarhet",
+          "definisjon": "et forhold ved direktoratets ansvar, rolle, kapasitet, kompetanse, styring, samhandling, data, teknologi eller avhengigheter som svekker evnen til å møte en driver."
+        },
+        {
+          "term": "Konsekvens",
+          "definisjon": "hva det kan bety for måloppnåelse, samfunnsoppdrag, ressursbruk, styring og kontroll, sikkerhet, beredskap, legitimitet eller tillit."
+        },
+        {
+          "term": "Risiko",
+          "definisjon": "en usikkerhet som kan påvirke evnen til å ivareta samfunnsoppdraget over 3-5 år. Risiko oppstår når en driver møter en sårbarhet og kan gi vesentlig konsekvens."
+        },
+        {
+          "term": "Forutsetning",
+          "definisjon": "det som må være sant for at risikoen skal være reell — om kapasitet, teknologi, regelverk, atferd eller andres prioriteringer. To risikoer kan hvile på forutsetninger som ikke kan være sanne samtidig."
+        },
+        {
+          "term": "Reduserende retning",
+          "definisjon": "hvilken vei noe måtte endres for at risikoen skulle bli mindre — mer av noe, mindre av noe annet. Beskrives som retning, ikke som tiltak direktoratet anbefales å sette i verk."
+        }
+      ],
+      "doc_fields": [
+        {
+          "key": "kildefunn",
+          "label": "Kildefunn",
+          "beskrivelse": "det dokumentet faktisk sier, direkte forankret i kilden"
+        },
+        {
+          "key": "drivere",
+          "label": "Drivere",
+          "beskrivelse": "mulige strategiske drivere, med retningen de trekker prioriteringene i"
+        },
+        {
+          "key": "sarbarheter",
+          "label": "Mulige sårbarheter",
+          "beskrivelse": "sårbarheter som bør undersøkes, formulert som hypoteser"
+        },
+        {
+          "key": "konsekvenser",
+          "label": "Mulige konsekvenser",
+          "beskrivelse": "hva det kan bety dersom driveren møter sårbarheten"
+        },
+        {
+          "key": "risikoer",
+          "label": "Foreløpige risikoer",
+          "beskrivelse": "«Kort navn: usikkerhet over 3-5 år, med kjeden driver -> sårbarhet -> konsekvens synlig»",
+          "tone": "danger"
+        },
+        {
+          "key": "forutsetninger",
+          "label": "Forutsetninger risikoene hviler på",
+          "beskrivelse": "for hver risiko: hva som må være sant for at den er reell, med risikoens navn foran"
+        },
+        {
+          "key": "reduserende_retning",
+          "label": "Reduserende retning",
+          "beskrivelse": "for hver risiko: hvilken vei noe måtte endres for at den skulle bli mindre, med risikoens navn foran — retning, ikke anbefalt tiltak"
+        },
+        {
+          "key": "avklaringssporsmal",
+          "label": "Avklaringsspørsmål",
+          "beskrivelse": "spørsmål til videre avklaring",
+          "context": false
+        }
+      ],
+      "doc_notes": [
+        {
+          "key": "relevans",
+          "label": "Relevans",
+          "beskrivelse": "kort vurdering av dokumentets relevans for strategisk risiko",
+          "lead": true
+        },
+        {
+          "key": "kildegrunnlag_styrke",
+          "label": "Kildegrunnlagets styrke",
+          "beskrivelse": "kort vurdering av hvor sterkt kildegrunnlaget er"
+        }
+      ],
+      "agg_item_fields": [
+        {
+          "key": "risiko_a",
+          "label": "Risiko A",
+          "beskrivelse": "navn og kort beskrivelse av den ene risikoen, med dokumentet den kommer fra"
+        },
+        {
+          "key": "risiko_b",
+          "label": "Risiko B",
+          "beskrivelse": "navn og kort beskrivelse av den andre risikoen, med dokumentet den kommer fra"
+        },
+        {
+          "key": "hva_som_motsier_hva",
+          "label": "Hva som motsier hva",
+          "beskrivelse": "det konkrete forholdet i A som står mot det konkrete forholdet i B, navngitt på begge sider"
+        },
+        {
+          "key": "hvor_motsetningen_ligger",
+          "label": "Hvor motsetningen ligger",
+          "beskrivelse": "om kollisjonen ligger i driverne, sårbarhetene, konsekvensene, forutsetningene eller den reduserende retningen — med begrunnelse"
+        },
+        {
+          "key": "folger_for_risikobildet",
+          "label": "Følger for risikobildet",
+          "beskrivelse": "hva motsetningen betyr for hvordan de to risikoene kan håndteres — hva som skjer med den ene når den andre håndteres"
+        },
+        {
+          "key": "risiko_ved_hver_for_seg",
+          "label": "Risiko ved å behandle dem hver for seg",
+          "beskrivelse": "hva som kan skje over 3-5 år dersom risikoene håndteres uavhengig av hverandre",
+          "tone": "danger"
+        },
+        {
+          "key": "avveining",
+          "label": "Avveiningen som må tas",
+          "beskrivelse": "valget motsetningen tvinger fram, og hvem som har myndighet til å ta det"
+        }
+      ],
+      "agg_top_fields": [
+        {
+          "key": "monstre",
+          "label": "Overordnede mønstre",
+          "beskrivelse": "hva motsetningene til sammen forteller om risikobildet og styringen av området",
+          "lead": true
+        },
+        {
+          "key": "tilsynelatende",
+          "label": "Tilsynelatende motsetninger",
+          "beskrivelse": "risikopar som ser ut til å kollidere, men der kollisjonen oppløses når en forutsetning presiseres — med presiseringen som skal til"
+        },
+        {
+          "key": "kilder_som_spriker",
+          "label": "Der kildene spriker",
+          "beskrivelse": "steder der dokumentene gir ulike svar på samme faktaspørsmål, med kildene som står mot hverandre"
+        },
+        {
+          "key": "kunnskapshull",
+          "label": "Usikkerhet og kunnskapshull",
+          "beskrivelse": "hva som må avklares for å vite hvor reelle motsetningene er"
+        },
+        {
+          "key": "sporsmal_til_ledergruppen",
+          "label": "Spørsmål til ledergruppen",
+          "beskrivelse": "avveiningene ledergruppen må ta stilling til, formulert som valg mellom to risikoer"
+        }
+      ],
+      "item_label": "Kort navn på motsetningen, formulert som «Risiko A mot Risiko B»",
+      "item_beskrivelse": "1-3 setninger: hvilke to risikoer det gjelder, og hvilket forhold i den ene som motsier hvilket forhold i den andre",
+      "items_label": "risikomotsetninger"
+    }
   }
 }
