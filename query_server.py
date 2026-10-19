@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
 from io import BytesIO
 from typing import Optional
@@ -273,8 +274,24 @@ def _read_doc_store_entries(doc_store_path: str, index_name: str) -> list[dict]:
     return all_entries
 
 # ── Job store for async aggregate jobs ───────────────────────────────────────
-# job_id -> {"status": "running"|"done"|"error", "events": [...], "result": {...}}
+# job_id -> {"status": "running"|"done"|"error", "events": [...], "result": {...},
+#            "done_at": <monotonic seconds when it reached a terminal status>}
 _jobs: dict = {}
+
+# A finished analysis is kept so both report variants (.docx/.pdf) can be
+# downloaded, but not forever — drop terminal jobs older than this so results
+# don't pile up in memory for a long-running process. Tunable via env.
+JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", "3600"))
+
+
+def _purge_old_jobs() -> None:
+    """Remove finished jobs whose results have outlived JOB_TTL_SECONDS. Running
+    jobs (no done_at yet) are always kept. Call when a new job is created."""
+    now = time.monotonic()
+    for jid, job in list(_jobs.items()):
+        done_at = job.get("done_at")
+        if done_at is not None and now - done_at > JOB_TTL_SECONDS:
+            _jobs.pop(jid, None)
 
 
 def _resolve_index(name: Optional[str]):
@@ -942,6 +959,7 @@ async def aggregate_stream():
     # An empty question is allowed: the analysis is then driven by the query type's
     # system prompt (see _resolve_question in aggregate_workflow).
 
+    _purge_old_jobs()  # drop results that have outlived their TTL
     job_id = str(uuid.uuid4())
     cancel_event = threading.Event()
     _jobs[job_id] = {"status": "running", "events": [], "result": None, "cancel_event": cancel_event}
@@ -955,10 +973,13 @@ async def aggregate_stream():
         if item.get("event") == "result":
             _jobs[job_id]["status"] = "done"
             _jobs[job_id]["result"] = item
+            _jobs[job_id]["done_at"] = time.monotonic()
         elif item.get("event") == "error":
             _jobs[job_id]["status"] = "error"
+            _jobs[job_id]["done_at"] = time.monotonic()
         elif item.get("event") == "cancelled":
             _jobs[job_id]["status"] = "cancelled"
+            _jobs[job_id]["done_at"] = time.monotonic()
 
     class QueueProxy:
         def put_nowait(self, item): loop.call_soon_threadsafe(_emit_job, item)
@@ -1016,6 +1037,8 @@ async def aggregate_stream():
             loop.call_soon_threadsafe(_emit_job, {"event": "error", "message": str(e)})
         finally:
             _jobs[job_id]["status"] = _jobs[job_id].get("status", "done")
+            # Guarantee a TTL stamp even if no terminal event was emitted.
+            _jobs[job_id].setdefault("done_at", time.monotonic())
 
     loop.run_in_executor(None, _run)
 
@@ -1096,16 +1119,10 @@ def _add_hyperlink(paragraph, url: str, text: str):
     return hyperlink
 
 
-def _add_bullets(doc, label: str, values, style: str = "List Bullet"):
-    """Add an optional bold label followed by a bulleted list. No-op if empty."""
-    values = [v for v in (values or []) if str(v).strip()]
-    if not values:
-        return
-    if label:
-        doc.add_paragraph(label).runs[0].bold = True
-    for v in values:
-        doc.add_paragraph(_xml_safe(str(v)), style=style)
-
+# ── Report model: one structure, two renderers (.docx and .pdf) ──────────────
+# The report is walked once into a flat list of heading/paragraph blocks, then
+# rendered to either format. Keeping the traversal in one place is what lets the
+# Word and PDF versions carry the same content.
 
 def _source_labels(sources) -> str:
     """Render an aggregate item's 'sources' (dicts or strings) as 'Tittel (s. 1, 2)'."""
@@ -1120,215 +1137,11 @@ def _source_labels(sources) -> str:
     return "; ".join(_xml_safe(l) for l in labels)
 
 
-def _doc_heading_with_link(doc, entry: dict):
-    """Add a level-3 doc heading 'Tittel - Utgiver - Årstall', hyperlinked if kilde_url."""
-    tittel_text = _xml_safe(entry.get("tittel") or entry.get("filename", ""))
-    publisert_av = _xml_safe((entry.get("publisert_av") or "").strip())
-    publisert_arstall = entry.get("publisert_arstall")
-    arstall_text = _xml_safe(str(publisert_arstall)) if publisert_arstall not in (None, "") else ""
-    parts = [tittel_text]
-    if publisert_av:
-        parts.append(publisert_av)
-    if arstall_text:
-        parts.append(arstall_text)
-    heading_label = " - ".join(parts)
-    kilde_url = (entry.get("kilde_url") or "").strip()
-    heading_p = doc.add_heading("", level=3)
-    if kilde_url:
-        _add_hyperlink(heading_p, kilde_url, heading_label)
-    else:
-        heading_p.add_run(heading_label)
-
-
-def _add_chunk_references(doc, chunks):
-    """Render retrieved source chunks as page-labelled excerpts."""
-    chunks = chunks or []
-    if not chunks:
-        return
-    doc.add_paragraph("Kildehenvisninger:", style="Intense Quote")
-    for chunk in chunks:
-        page = chunk.get("page")
-        excerpt = _xml_safe((chunk.get("excerpt") or "").strip())
-        deep = (chunk.get("deep_link") or "").strip()
-        label = f"[Side {page}]  " if page is not None else ""
-        p = doc.add_paragraph(style="List Bullet 2")
-        if label:
-            p.add_run(label).bold = True
-        p.add_run(excerpt)
-        if deep:
-            p.add_run("  ")
-            _add_hyperlink(p, deep, "↗ åpne sitatet på nettsiden")
-
-
-def _render_structured_report(doc, cfg: dict, result: dict, items: list, per_doc: list):
-    """Render a structured analysis: optional cross-document syntese followed by
-    the evidence for it, broken down per finding.
-
-    Which headings appear is the template's business — Strategisk risiko declares
-    its analysekjede, a wizard-built template declares whatever it asks for, and
-    this walks the declaration either way."""
-    top_fields  = _spec_fields(cfg, "agg_top_fields")
-    item_fields = _spec_fields(cfg, "agg_item_fields")
-    lead = [f for f in top_fields if f.get("lead")]
-    tail = [f for f in top_fields if not f.get("lead")]
-
-    # ── Syntese på tvers — only when aggregation ran and produced content ──
-    if result.get("aggregated") and (items or any(result.get(f["key"]) for f in top_fields)):
-        doc.add_heading("Syntese på tvers av dokumentene", level=2)
-        for field in lead:
-            _add_bullets(doc, f"{field['label']}:", result.get(field["key"]))
-        for item in items:
-            doc.add_heading(_xml_safe(item.get("label", "")), level=3)
-            if item.get("beskrivelse"):
-                doc.add_paragraph(_xml_safe(item["beskrivelse"]))
-            for field in item_fields:
-                _add_bullets(doc, f"{field['label']}:", item.get(field["key"]))
-            if item.get("sources"):
-                p = doc.add_paragraph("Kilder: ")
-                p.add_run(_source_labels(item["sources"])).italic = True
-        for field in tail:
-            _add_bullets(doc, f"{field['label']}:", result.get(field["key"]))
-
-    # ── Analyse per funn ──
-    # Without a synthesis there are no findings to hang documents on, so that
-    # case keeps the per-document listing.
-    if per_doc and result.get("aggregated") and items:
-        _render_structured_findings_detail(doc, cfg, items, per_doc)
-    elif per_doc:
-        doc.add_heading("Analyse per dokument", level=2)
-        for entry in per_doc:
-            _doc_heading_with_link(doc, entry)
-            _structured_doc_body(doc, cfg, entry)
-
-
-def _structured_doc_body(doc, cfg: dict, entry: dict) -> None:
-    """One document's full answer, under a heading the caller has written."""
-    s = entry.get("structured") or {}
-    notes = _spec_fields(cfg, "doc_notes")
-    lead = [f for f in notes if f.get("lead")]
-    tail = [f for f in notes if not f.get("lead")]
-
-    def _note(field):
-        if not s.get(field["key"]):
-            return
-        p = doc.add_paragraph()
-        p.add_run(f"{field['label']}: ").bold = True
-        p.add_run(_xml_safe(str(s[field["key"]])))
-
-    for field in lead:
-        _note(field)
-    for field in _spec_fields(cfg, "doc_fields"):
-        _add_bullets(doc, f"{field['label']}:", s.get(field["key"]))
-    for field in tail:
-        _note(field)
-    if not s:  # defensive fallback
-        for finding in entry.get("findings", []):
-            doc.add_paragraph(_xml_safe(finding), style="List Bullet")
-    _add_chunk_references(doc, entry.get("chunks"))
-
-
-def _render_structured_findings_detail(doc, cfg: dict, items: list, per_doc: list) -> None:
-    """Every finding followed by the documents behind it and what each one
-    contributed — the report counterpart of the per-finding view on screen."""
-    by_title = {}
-    for entry in per_doc:
-        key = _norm_title(entry.get("tittel") or entry.get("filename") or "")
-        if key and key not in by_title:
-            by_title[key] = entry
-
-    cited = set()
-    doc.add_heading("Analyse per funn", level=2)
-    p = doc.add_paragraph("Hva som er trukket ut av hvert dokument bak det enkelte funnet.")
-    p.runs[0].italic = True
-
-    for item in items:
-        doc.add_heading(_xml_safe(item.get("label", "")), level=3)
-        if item.get("beskrivelse"):
-            doc.add_paragraph(_xml_safe(item["beskrivelse"]))
-
-        sources = item.get("sources") or []
-        if not sources:
-            doc.add_paragraph("Ingen kilder er registrert for dette funnet.").runs[0].italic = True
-            continue
-
-        for s in sources:
-            if isinstance(s, dict):
-                tittel, pages = s.get("tittel") or "", s.get("pages") or []
-            else:
-                tittel, pages = str(s), []
-            entry = by_title.get(_norm_title(tittel))
-            if entry is None:
-                # The synthesis named a source the per-document pass didn't
-                # produce — say so rather than drop the reference.
-                para = doc.add_paragraph(style="List Bullet")
-                para.add_run(_xml_safe(tittel)).bold = True
-                if pages:
-                    para.add_run(f" (s. {_xml_safe(', '.join(str(pg) for pg in pages))})")
-                para.add_run("  — ingen utdrag tilgjengelig").italic = True
-                continue
-            cited.add(_norm_title(tittel))
-            _doc_heading(doc, entry, level=4)
-            sd = entry.get("structured") or {}
-            for field in _spec_fields(cfg, "doc_notes"):
-                if field.get("lead") and sd.get(field["key"]):
-                    para = doc.add_paragraph()
-                    para.add_run(f"{field['label']}: ").bold = True
-                    para.add_run(_xml_safe(str(sd[field["key"]])))
-            # Under a finding there is room for one list, so it is the field the
-            # template says the document is read for.
-            first = _spec_fields(cfg, "doc_fields")[:1]
-            extracted = (sd.get(first[0]["key"]) if first else None) or entry.get("findings")
-            _add_bullets(doc, "Trukket ut fra dokumentet:", extracted)
-            _add_quotes(doc, _chunks_for(entry, pages))
-
-    leftovers = [e for e in per_doc
-                 if _norm_title(e.get("tittel") or e.get("filename") or "") not in cited]
-    if leftovers:
-        doc.add_heading("Dokumenter uten sitater i funnene over", level=2)
-        for entry in leftovers:
-            _doc_heading_with_link(doc, entry)
-            _structured_doc_body(doc, cfg, entry)
-
-
 def _norm_title(s: str) -> str:
     """Loose key for matching a finding's source back to the document it came
     from — the two are produced by different LLM passes, so spacing and casing
     can't be relied on."""
     return " ".join((s or "").split()).casefold()
-
-
-def _doc_heading(doc, entry, level):
-    """Document heading, linked to the source when there is a URL to link to."""
-    parts = [(entry.get("tittel") or entry.get("filename") or "").strip()]
-    if (entry.get("publisert_av") or "").strip():
-        parts.append(entry["publisert_av"].strip())
-    if entry.get("publisert_arstall") not in (None, ""):
-        parts.append(str(entry["publisert_arstall"]))
-    label = _xml_safe(" - ".join(p for p in parts if p))
-    p = doc.add_heading("", level=level)
-    url = (entry.get("kilde_url") or "").strip()
-    if url:
-        _add_hyperlink(p, url, label)
-    else:
-        p.add_run(label)
-    return p
-
-
-def _add_quotes(doc, chunks):
-    """Render passages as quotations, each with its page and a link back."""
-    for chunk in chunks:
-        excerpt = _xml_safe((chunk.get("excerpt") or "").strip())
-        if not excerpt:
-            continue
-        page = chunk.get("page")
-        p = doc.add_paragraph(style="List Bullet 2")
-        if page is not None:
-            p.add_run(f"[Side {_xml_safe(str(page))}] ").bold = True
-        p.add_run(f"\u00ab{excerpt}\u00bb").italic = True
-        deep = (chunk.get("deep_link") or "").strip()
-        if deep:
-            p.add_run("  ")
-            _add_hyperlink(p, deep, "\u2197 \u00e5pne sitatet p\u00e5 nettsiden")
 
 
 def _chunks_for(entry, pages):
@@ -1343,168 +1156,402 @@ def _chunks_for(entry, pages):
     return hit or chunks
 
 
-def _render_findings_detail(doc, items, per_doc):
-    """Per-finding drill-down: every finding followed by the documents behind it
-    and the passages that support it.
-
-    This replaced a per-document listing. Grouping by document meant the
-    evidence for a single finding was scattered across the report and had to be
-    reassembled by hand; grouping by finding puts the claim and its citations
-    together.
-    """
-    by_title = {}
-    for entry in per_doc:
-        key = _norm_title(entry.get("tittel") or entry.get("filename") or "")
-        if key and key not in by_title:
-            by_title[key] = entry
-
-    cited = set()
-    doc.add_heading("Funnene i detalj", level=2)
-
-    for item in items:
-        doc.add_heading(_xml_safe(item.get("label", "")), level=3)
-        if item.get("description"):
-            doc.add_paragraph(_xml_safe(item["description"]))
-
-        sources = item.get("sources") or []
-        if not sources:
-            doc.add_paragraph("Ingen kilder er registrert for dette funnet.").runs[0].italic = True
-            continue
-
-        for s in sources:
-            if isinstance(s, dict):
-                tittel, pages = s.get("tittel") or "", s.get("pages") or []
-            else:
-                tittel, pages = str(s), []
-            key = _norm_title(tittel)
-            entry = by_title.get(key)
-            if entry is None:
-                # The synthesis named a source the per-document pass didn't
-                # produce — say so rather than drop the reference.
-                p = doc.add_paragraph(style="List Bullet")
-                p.add_run(_xml_safe(tittel)).bold = True
-                if pages:
-                    p.add_run(f" (s. {_xml_safe(', '.join(str(pg) for pg in pages))})")
-                p.add_run("  \u2014 ingen sitater tilgjengelig").italic = True
-                continue
-            cited.add(key)
-            _doc_heading(doc, entry, level=4)
-            _add_quotes(doc, _chunks_for(entry, pages))
-
-    # Documents the synthesis never cited still carry their own findings, and
-    # dropping them silently would understate what the analysis looked at.
-    leftovers = [e for e in per_doc
-                 if _norm_title(e.get("tittel") or e.get("filename") or "") not in cited]
-    if leftovers:
-        doc.add_heading("Dokumenter uten sitater i funnene over", level=2)
-        for entry in leftovers:
-            _doc_heading(doc, entry, level=3)
-            for finding in entry.get("findings", []):
-                doc.add_paragraph(_xml_safe(finding), style="List Bullet")
-            _add_quotes(doc, entry.get("chunks") or [])
+# A block is a heading or a paragraph built from styled runs. A run is a piece of
+# text that may be bold, italic, or a hyperlink. Paragraph `style` is one of
+# None, "bullet", "bullet2" (a nested bullet) or "quotehead".
+def _run(text, *, b=False, i=False, href=None):
+    return {"s": _xml_safe(text), "b": b, "i": i, "href": (href or "").strip() or None}
 
 
-def _generate_report_docx(result: dict) -> bytes:
-    from docx import Document
+def _h(level, text=None, runs=None):
+    return {"t": "heading", "level": level, "runs": runs if runs is not None else [_run(text or "")]}
 
+
+def _p(runs=None, *, text=None, style=None, b=False, i=False):
+    if runs is None:
+        runs = [_run(text or "", b=b, i=i)]
+    return {"t": "para", "style": style, "runs": runs}
+
+
+def _report_blocks(result: dict) -> list:
+    """Walk one analysis result into heading/paragraph blocks — the single source
+    of truth that both the .docx and .pdf renderers consume."""
     OUTPUT_KEYS = {
         "problems": "problems", "moments": "moments", "personas": "personas",
         "free": "findings", "strategisk_risiko": "risikoomrader",
     }
-
-    doc     = Document()
     qt      = result.get("query_type", "")
     idx     = result.get("index_name", "")
     cfg     = _effective_cfg(qt) or {}
     items   = result.get(OUTPUT_KEYS.get(qt, "findings"), [])
     per_doc = result.get("per_doc_findings", [])
 
-    doc.add_heading(_xml_safe(result.get("question", "Rapport")), level=1)
+    blocks: list = []
+    add = blocks.append
 
-    meta = doc.add_paragraph()
-    meta.add_run(f"Query type: {qt}").bold = True
-    if idx:
-        doc.add_paragraph(f"Index: {idx}")
-    doc.add_paragraph(f"Generert: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    doc.add_paragraph(
-        f"{result.get('documents_visited', 0)} dokumenter besøkt · "
-        f"{result.get('documents_with_findings', 0)} med funn · "
-        f"{len(items)} resultater"
-    )
+    def doc_heading(entry, level):
+        parts = [(entry.get("tittel") or entry.get("filename") or "").strip()]
+        if (entry.get("publisert_av") or "").strip():
+            parts.append(entry["publisert_av"].strip())
+        if entry.get("publisert_arstall") not in (None, ""):
+            parts.append(str(entry["publisert_arstall"]))
+        label = " - ".join(p for p in parts if p)
+        add(_h(level, runs=[_run(label, href=entry.get("kilde_url"))]))
 
-    # A structured template answers in its own shape, so the report follows what
-    # it declared rather than the flat finding list below.
-    if cfg.get("structured"):
-        _render_structured_report(doc, cfg, result, items, per_doc)
-        buf = BytesIO()
-        doc.save(buf)
-        return buf.getvalue()
+    def add_bullets(label, values, style="bullet"):
+        values = [v for v in (values or []) if str(v).strip()]
+        if not values:
+            return
+        if label:
+            add(_p(text=label, b=True))
+        for v in values:
+            add(_p(text=str(v), style=style))
 
-    if items:
-        doc.add_heading("Aggregerte funn", level=2)
-        for item in items:
-            doc.add_heading(_xml_safe(item.get("label", "")), level=3)
-            if item.get("description"):
-                doc.add_paragraph(_xml_safe(item["description"]))
-            for challenge in item.get("challenges") or []:
-                doc.add_paragraph(_xml_safe(challenge), style="List Bullet")
-            if item.get("needs"):
-                doc.add_paragraph("Behov:").runs[0].bold = True
-                for need in item["needs"]:
-                    doc.add_paragraph(_xml_safe(need), style="List Bullet")
-            if item.get("sources"):
-                p = doc.add_paragraph("Kilder: ")
-                labels = []
-                for s in item["sources"]:
-                    if isinstance(s, dict):
-                        tittel = s.get("tittel") or ""
-                        pages = s.get("pages") or []
-                        labels.append(tittel + (f" (s. {', '.join(str(pg) for pg in pages)})" if pages else ""))
-                    else:
-                        labels.append(str(s))
-                p.add_run("; ".join(_xml_safe(l) for l in labels)).italic = True
+    def add_quotes(chunks):
+        for chunk in chunks or []:
+            excerpt = (chunk.get("excerpt") or "").strip()
+            if not excerpt:
+                continue
+            runs = []
+            page = chunk.get("page")
+            if page is not None:
+                runs.append(_run(f"[Side {page}] ", b=True))
+            runs.append(_run(f"«{excerpt}»", i=True))
+            deep = (chunk.get("deep_link") or "").strip()
+            if deep:
+                runs.append(_run("  "))
+                runs.append(_run("↗ åpne sitatet på nettsiden", href=deep))
+            add(_p(runs=runs, style="bullet2"))
 
-    # Without a synthesis there are no findings to hang documents on, so that
-    # case keeps a plain per-document listing.
-    if items:
-        _render_findings_detail(doc, items, per_doc)
-    elif per_doc:
-        doc.add_heading("Analyse per dokument", level=2)
-        for entry in per_doc:
-            _doc_heading(doc, entry, level=3)
+    def add_chunk_references(chunks):
+        chunks = chunks or []
+        if not chunks:
+            return
+        add(_p(text="Kildehenvisninger:", style="quotehead"))
+        for chunk in chunks:
+            page = chunk.get("page")
+            excerpt = (chunk.get("excerpt") or "").strip()
+            deep = (chunk.get("deep_link") or "").strip()
+            runs = []
+            if page is not None:
+                runs.append(_run(f"[Side {page}]  ", b=True))
+            runs.append(_run(excerpt))
+            if deep:
+                runs.append(_run("  "))
+                runs.append(_run("↗ åpne sitatet på nettsiden", href=deep))
+            add(_p(runs=runs, style="bullet2"))
+
+    def structured_doc_body(entry):
+        s = entry.get("structured") or {}
+        notes = _spec_fields(cfg, "doc_notes")
+        lead = [f for f in notes if f.get("lead")]
+        tail = [f for f in notes if not f.get("lead")]
+
+        def note(field):
+            if not s.get(field["key"]):
+                return
+            add(_p(runs=[_run(f"{field['label']}: ", b=True), _run(str(s[field["key"]]))]))
+
+        for field in lead:
+            note(field)
+        for field in _spec_fields(cfg, "doc_fields"):
+            add_bullets(f"{field['label']}:", s.get(field["key"]))
+        for field in tail:
+            note(field)
+        if not s:
             for finding in entry.get("findings", []):
-                doc.add_paragraph(_xml_safe(finding), style="List Bullet")
-            _add_quotes(doc, entry.get("chunks") or [])
+                add(_p(text=finding, style="bullet"))
+        add_chunk_references(entry.get("chunks"))
 
+    def render_structured_findings_detail():
+        by_title = {}
+        for entry in per_doc:
+            key = _norm_title(entry.get("tittel") or entry.get("filename") or "")
+            if key and key not in by_title:
+                by_title[key] = entry
+        cited = set()
+        add(_h(2, "Analyse per funn"))
+        add(_p(text="Hva som er trukket ut av hvert dokument bak det enkelte funnet.", i=True))
+        for item in items:
+            add(_h(3, item.get("label", "")))
+            if item.get("beskrivelse"):
+                add(_p(text=item["beskrivelse"]))
+            sources = item.get("sources") or []
+            if not sources:
+                add(_p(text="Ingen kilder er registrert for dette funnet.", i=True))
+                continue
+            for s in sources:
+                if isinstance(s, dict):
+                    tittel, pages = s.get("tittel") or "", s.get("pages") or []
+                else:
+                    tittel, pages = str(s), []
+                entry = by_title.get(_norm_title(tittel))
+                if entry is None:
+                    runs = [_run(tittel, b=True)]
+                    if pages:
+                        runs.append(_run(f" (s. {', '.join(str(pg) for pg in pages)})"))
+                    runs.append(_run("  — ingen utdrag tilgjengelig", i=True))
+                    add(_p(runs=runs, style="bullet"))
+                    continue
+                cited.add(_norm_title(tittel))
+                doc_heading(entry, 4)
+                sd = entry.get("structured") or {}
+                for field in _spec_fields(cfg, "doc_notes"):
+                    if field.get("lead") and sd.get(field["key"]):
+                        add(_p(runs=[_run(f"{field['label']}: ", b=True), _run(str(sd[field["key"]]))]))
+                first = _spec_fields(cfg, "doc_fields")[:1]
+                extracted = (sd.get(first[0]["key"]) if first else None) or entry.get("findings")
+                add_bullets("Trukket ut fra dokumentet:", extracted)
+                add_quotes(_chunks_for(entry, pages))
+        leftovers = [e for e in per_doc
+                     if _norm_title(e.get("tittel") or e.get("filename") or "") not in cited]
+        if leftovers:
+            add(_h(2, "Dokumenter uten sitater i funnene over"))
+            for entry in leftovers:
+                doc_heading(entry, 3)
+                structured_doc_body(entry)
+
+    def render_structured_report():
+        top_fields  = _spec_fields(cfg, "agg_top_fields")
+        item_fields = _spec_fields(cfg, "agg_item_fields")
+        lead = [f for f in top_fields if f.get("lead")]
+        tail = [f for f in top_fields if not f.get("lead")]
+        if result.get("aggregated") and (items or any(result.get(f["key"]) for f in top_fields)):
+            add(_h(2, "Syntese på tvers av dokumentene"))
+            for field in lead:
+                add_bullets(f"{field['label']}:", result.get(field["key"]))
+            for item in items:
+                add(_h(3, item.get("label", "")))
+                if item.get("beskrivelse"):
+                    add(_p(text=item["beskrivelse"]))
+                for field in item_fields:
+                    add_bullets(f"{field['label']}:", item.get(field["key"]))
+                if item.get("sources"):
+                    add(_p(runs=[_run("Kilder: "), _run(_source_labels(item["sources"]), i=True)]))
+            for field in tail:
+                add_bullets(f"{field['label']}:", result.get(field["key"]))
+        if per_doc and result.get("aggregated") and items:
+            render_structured_findings_detail()
+        elif per_doc:
+            add(_h(2, "Analyse per dokument"))
+            for entry in per_doc:
+                doc_heading(entry, 3)
+                structured_doc_body(entry)
+
+    def render_findings_detail():
+        by_title = {}
+        for entry in per_doc:
+            key = _norm_title(entry.get("tittel") or entry.get("filename") or "")
+            if key and key not in by_title:
+                by_title[key] = entry
+        cited = set()
+        add(_h(2, "Funnene i detalj"))
+        for item in items:
+            add(_h(3, item.get("label", "")))
+            if item.get("description"):
+                add(_p(text=item["description"]))
+            sources = item.get("sources") or []
+            if not sources:
+                add(_p(text="Ingen kilder er registrert for dette funnet.", i=True))
+                continue
+            for s in sources:
+                if isinstance(s, dict):
+                    tittel, pages = s.get("tittel") or "", s.get("pages") or []
+                else:
+                    tittel, pages = str(s), []
+                key = _norm_title(tittel)
+                entry = by_title.get(key)
+                if entry is None:
+                    runs = [_run(tittel, b=True)]
+                    if pages:
+                        runs.append(_run(f" (s. {', '.join(str(pg) for pg in pages)})"))
+                    runs.append(_run("  — ingen sitater tilgjengelig", i=True))
+                    add(_p(runs=runs, style="bullet"))
+                    continue
+                cited.add(key)
+                doc_heading(entry, 4)
+                add_quotes(_chunks_for(entry, pages))
+        leftovers = [e for e in per_doc
+                     if _norm_title(e.get("tittel") or e.get("filename") or "") not in cited]
+        if leftovers:
+            add(_h(2, "Dokumenter uten sitater i funnene over"))
+            for entry in leftovers:
+                doc_heading(entry, 3)
+                for finding in entry.get("findings", []):
+                    add(_p(text=finding, style="bullet"))
+                add_quotes(entry.get("chunks") or [])
+
+    # ── Header, shared by every shape ──
+    add(_h(1, result.get("question", "Rapport")))
+    add(_p(runs=[_run(f"Query type: {qt}", b=True)]))
+    if idx:
+        add(_p(text=f"Index: {idx}"))
+    add(_p(text=f"Generert: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"))
+    add(_p(text=(f"{result.get('documents_visited', 0)} dokumenter besøkt · "
+                 f"{result.get('documents_with_findings', 0)} med funn · "
+                 f"{len(items)} resultater")))
+
+    if cfg.get("structured"):
+        render_structured_report()
+        return blocks
+
+    if items:
+        add(_h(2, "Aggregerte funn"))
+        for item in items:
+            add(_h(3, item.get("label", "")))
+            if item.get("description"):
+                add(_p(text=item["description"]))
+            for challenge in item.get("challenges") or []:
+                add(_p(text=challenge, style="bullet"))
+            if item.get("needs"):
+                add(_p(text="Behov:", b=True))
+                for need in item["needs"]:
+                    add(_p(text=need, style="bullet"))
+            if item.get("sources"):
+                add(_p(runs=[_run("Kilder: "), _run(_source_labels(item["sources"]), i=True)]))
+
+    if items:
+        render_findings_detail()
+    elif per_doc:
+        add(_h(2, "Analyse per dokument"))
+        for entry in per_doc:
+            doc_heading(entry, 3)
+            for finding in entry.get("findings", []):
+                add(_p(text=finding, style="bullet"))
+            add_quotes(entry.get("chunks") or [])
+
+    return blocks
+
+
+def _render_docx(blocks) -> bytes:
+    """Render the block model to a Word document."""
+    from docx import Document
+
+    doc = Document()
+    STYLE = {"bullet": "List Bullet", "bullet2": "List Bullet 2", "quotehead": "Intense Quote"}
+    for blk in blocks:
+        if blk["t"] == "heading":
+            p = doc.add_heading("", level=blk["level"])
+        else:
+            style = STYLE.get(blk.get("style"))
+            p = doc.add_paragraph(style=style) if style else doc.add_paragraph()
+        for run in blk["runs"]:
+            if run.get("href"):
+                _add_hyperlink(p, run["href"], run["s"])
+            else:
+                r = p.add_run(run["s"])
+                if run.get("b"):
+                    r.bold = True
+                if run.get("i"):
+                    r.italic = True
     buf = BytesIO()
     doc.save(buf)
     return buf.getvalue()
 
 
+def _render_pdf(blocks) -> bytes:
+    """Render the block model to a PDF (reportlab, pure Python — no Word/LibreOffice).
+    Same content as the .docx; layout is reportlab's own."""
+    import html as _html
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, ListFlowable, ListItem
+
+    ss = getSampleStyleSheet()
+    body = ParagraphStyle("Body", parent=ss["BodyText"], fontSize=10.5, leading=15, spaceAfter=4)
+    hstyles = {
+        1: ParagraphStyle("H1", parent=ss["Heading1"], spaceBefore=2, spaceAfter=8),
+        2: ParagraphStyle("H2", parent=ss["Heading2"], spaceBefore=14, spaceAfter=6),
+        3: ParagraphStyle("H3", parent=ss["Heading3"], spaceBefore=10, spaceAfter=4),
+        4: ParagraphStyle("H4", parent=ss["Heading4"], spaceBefore=8, spaceAfter=3),
+    }
+
+    def inline(runs):
+        out = []
+        for r in runs:
+            # reportlab's mini-markup is XML; the arrow glyph isn't in the base
+            # font, so drop it in the PDF (the link text still reads fine).
+            t = _html.escape((r["s"] or "").replace("↗", "")).replace("\n", "<br/>")
+            if r.get("href"):
+                href = _html.escape(r["href"], quote=True)
+                t = f'<a href="{href}" color="#0563C1"><u>{t}</u></a>'
+            else:
+                if r.get("b"):
+                    t = f"<b>{t}</b>"
+                if r.get("i"):
+                    t = f"<i>{t}</i>"
+            out.append(t)
+        return "".join(out) or "&nbsp;"
+
+    flow = []
+    for blk in blocks:
+        if blk["t"] == "heading":
+            flow.append(Paragraph(inline(blk["runs"]), hstyles.get(blk["level"], hstyles[4])))
+            continue
+        para = Paragraph(inline(blk["runs"]), body)
+        style = blk.get("style")
+        if style in ("bullet", "bullet2"):
+            indent = 14 if style == "bullet" else 30
+            flow.append(ListFlowable(
+                [ListItem(para, leftIndent=indent + 8, value="•")],
+                bulletType="bullet", start="•", leftIndent=indent, bulletFontSize=7,
+            ))
+        else:
+            flow.append(para)
+
+    buf = BytesIO()
+    SimpleDocTemplate(
+        buf, pagesize=A4, title="Rapport",
+        topMargin=18 * mm, bottomMargin=18 * mm, leftMargin=20 * mm, rightMargin=20 * mm,
+    ).build(flow)
+    return buf.getvalue()
+
+
+def _generate_report_docx(result: dict) -> bytes:
+    return _render_docx(_report_blocks(result))
+
+
+def _generate_report_pdf(result: dict) -> bytes:
+    return _render_pdf(_report_blocks(result))
+
+
+_REPORT_FORMATS = {
+    "docx": (_generate_report_docx,
+             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    "pdf":  (_generate_report_pdf, "application/pdf"),
+}
+
+
 @app.get("/aggregate/report/<job_id>")
 async def aggregate_report(job_id):
+    # ?format=docx (default) or pdf — same content, two renderers. The job is kept
+    # so both variants can be downloaded from the one finished analysis.
+    fmt = (request.args.get("format") or "docx").lower()
+    if fmt not in _REPORT_FORMATS:
+        return jsonify({"error": f"Unknown format '{fmt}' — use docx or pdf"}), 400
+    generate, mimetype = _REPORT_FORMATS[fmt]
+
     job = _jobs.get(job_id)
     if not job:
-        return jsonify({"error": "Job not found — may have already been downloaded"}), 404
+        return jsonify({"error": "Job not found — may have expired"}), 404
     if job["status"] != "done":
         return jsonify({"error": "Job not finished yet"}), 400
 
     result = job.get("result") or {}
     loop = asyncio.get_event_loop()
     try:
-        docx_bytes = await loop.run_in_executor(None, _generate_report_docx, result)
+        data = await loop.run_in_executor(None, generate, result)
     except Exception as e:
-        logging.error("Report generation failed: %s", e, exc_info=True)
-        return jsonify({"error": "Report generation failed", "detail": str(e)}), 500
-
-    _jobs.pop(job_id, None)
+        logging.error("Report generation (%s) failed: %s", fmt, e, exc_info=True)
+        return jsonify({"error": "Report generation failed"}), 500
 
     from quart import Response
     question_slug = "".join(c if c.isalnum() else "_" for c in result.get("question", "rapport")[:40])
-    filename = f"{question_slug}.docx"
+    filename = f"{question_slug}.{fmt}"
     return Response(
-        docx_bytes,
-        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        data,
+        mimetype=mimetype,
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
     )
 
@@ -1532,11 +1579,17 @@ def _safe_filename(name: str) -> str:
 def _check_upload_ext(fname: str) -> None:
     """Reject upload filenames whose extension the ingest pipeline can't read."""
     ext = os.path.splitext(fname)[1].lower()
-    if ext not in ALLOWED_UPLOAD_EXTS:
+    if ext in ALLOWED_UPLOAD_EXTS:
+        return
+    if ext == ".doc":
         raise ValueError(
-            f"Filtypen '{ext or '(ingen)'}' støttes ikke. "
-            f"Tillatte typer: {', '.join(sorted(ALLOWED_UPLOAD_EXTS))}."
+            "Gammelt Word-format (.doc) støttes ikke. Lagre dokumentet som .docx "
+            "(Fil → Lagre som → Word-dokument) og last det opp på nytt."
         )
+    raise ValueError(
+        f"Filtypen '{ext or '(ingen)'}' støttes ikke. "
+        f"Tillatte typer: {', '.join(sorted(ALLOWED_UPLOAD_EXTS))}."
+    )
 
 
 def _validate_json_filnavn(filnavn: str) -> None:
@@ -2399,18 +2452,22 @@ def _derive_metadata_from_file(tmp_path: str, fname: str, max_chars: int = 20000
     metadata. Returns a dict limited to the known metadata keys."""
     from pathlib import Path
     from langchain_core.messages import SystemMessage, HumanMessage
-    from llama_index.readers.file import DocxReader, PDFReader, PptxReader
+    from llama_index.readers.file import PDFReader, PptxReader
     from aggregate_workflow import _parse_json_block
+    from utils.create_lab_vectorindex.ingest_pdfs import docx_full_text
 
     suffix = os.path.splitext(fname)[1].lower()
-    if suffix in (".pptx", ".ppt"):
-        reader = PptxReader()
-    elif suffix == ".docx":
-        reader = DocxReader()
+    if suffix == ".doc":
+        raise ValueError(
+            "Gammelt Word-format (.doc) støttes ikke. Lagre dokumentet som .docx."
+        )
+    if suffix == ".docx":
+        # python-docx, matching the ingest path (avoids the docx2txt reader).
+        text = docx_full_text(tmp_path)
     else:
-        reader = PDFReader()
-    pages = reader.load_data(file=Path(tmp_path))
-    text = "\n\n".join((getattr(p, "text", "") or "") for p in pages).strip()
+        reader = PptxReader() if suffix in (".pptx", ".ppt") else PDFReader()
+        pages = reader.load_data(file=Path(tmp_path))
+        text = "\n\n".join((getattr(p, "text", "") or "") for p in pages).strip()
     if not text:
         raise ValueError("Fant ingen tekst i dokumentet (kan være skannet/bilde-PDF).")
     text = text[:max_chars]

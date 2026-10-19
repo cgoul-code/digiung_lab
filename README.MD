@@ -15,6 +15,11 @@ The server auto-detects Azure App Service via the `WEBSITE_SITE_NAME` env var.
 When in Azure, indexes, source files, and `document_store.json` are mirrored
 to the blob container set by `CONTAINER_NAME` (using `CONNECTION_STRING`).
 
+> Dette beskriver blob-mekanismen i koden. Dagens produksjonsoppsett lagrer i
+> stedet varig tilstand på en montert SMB file share — se
+> [App Service-oppsett](#app-service-oppsett-lagring-og-miljøvariabler) for
+> hvilke variabler som faktisk må settes, og hvordan de to henger sammen.
+
 Container layout:
 - `<index_name>/` — LlamaIndex persist files (downloaded at startup, uploaded after reindex)
 - `data/<index_name>/<filename>` — uploaded source PDFs/PPTX
@@ -45,10 +50,123 @@ Container vinner alltid ved oppstart, så `true` overskriver eventuelle lokale
 endringer du har gjort siden forrige nedlasting. Sett `false` (eller fjern
 linja) for å gå tilbake til ren lokal modus.
 
-Required env vars on App Service:
-- `CONNECTION_STRING` — storage account connection string
-- `CONTAINER_NAME` — blob container name (e.g. `chatbot`)
-- plus the existing Azure OpenAI vars
+### App Service-oppsett: lagring og miljøvariabler
+
+**Filsystemet i Azure er efemert.** Oryx pakker ut deploy-pakka til `/tmp/<hash>`
+og kjører prosessen derfra — CWD er altså *ikke* `/home/site/wwwroot`. Alt
+utenfor `/home` og utenfor monterte volum slettes ved **hver containerstart**,
+ikke bare ved deploy. Samtlige standardstier i `query_server.py` er relative
+(`./utils/create_lab_vectorindex/…`) og lander dermed i `/tmp`.
+
+Derfor må alle stivariablene under settes eksplisitt i App Settings. Gjør man
+det ikke, ser lagring ut til å virke — endepunktet svarer 200, fila skrives,
+GUI-et viser riktig — og så er alt tilbake til deploy-pakkas innhold ved neste
+restart. Symptomet er analysemaler og bank→mal-koblinger som «ikke lagres», og
+som flakker mellom ulike tilstander fra økt til økt.
+
+#### Path mapping
+
+`/blobstorage/chatbot` → SMB file share `labdocumentquery`
+(**Configuration → Path mappings**).
+
+Mountet finnes kun i app-containeren. Kudus web-console og filbehandler kjører i
+en *egen* container som bare deler `/home`, og ser det ikke. Skal du inspisere
+eller kopiere noe der, bruk **Development Tools → SSH**.
+
+#### Stier — må settes, ellers går data tapt
+
+| Variabel | Verdi | Uten den |
+|---|---|---|
+| `DOCUMENT_STORE_PATH` | `/blobstorage/chatbot/document_store.json` | `/tmp` — dokumentbankene forsvinner |
+| `CUSTOM_QT_STORE_PATH` | `/blobstorage/chatbot/custom_query_types.json` | `/tmp` — egne analysemaler forsvinner |
+| `INDEX_QT_STORE_PATH` | `/blobstorage/chatbot/index_query_types.json` | `/tmp` — koblingen bank→maler forsvinner |
+| `PROMPTS_STORE_PATH` | `/blobstorage/chatbot/query_type_prompts.json` | `/tmp` — prompt-overstyringer forsvinner |
+| `EXAMPLES_STORE_PATH` | `/blobstorage/chatbot/example_questions.json` | `/tmp` — forslagsspørsmålene forsvinner |
+| `INDEX_STORAGE` | `/blobstorage/chatbot/indexes` | faller til `/blobstorage/chatbot` |
+| `DATA_DIR` | `/blobstorage/chatbot/data` | faller til `/data` — efemer |
+
+Alle sju er bekreftet satt i dagens App Settings.
+
+#### Blob-speiling — valgfri, og den overstyrer file share-en
+
+Koden har i tillegg en eldre speilingsmekanisme mot **Blob Storage** (ikke
+samme tjeneste som file share-en; separate navnerom, også på samme konto):
+
+| Variabel | Verdi |
+|---|---|
+| `CONNECTION_STRING` | connection string til lagringskontoen |
+| `CONTAINER_NAME` | blob-container, f.eks. `chatbot` |
+| `USE_BLOB_INDEXES` | `true` / `false` — uten den er den **på** i Azure |
+
+`azure_blob.ENABLED` krever at *begge* de to første er satt. Mangler én, blir
+hver `upload_file` en stille no-op: returverdien ignoreres av `_save_*`, så
+ingenting feiler synlig.
+
+⚠️ **Rekkefølgen ved oppstart er viktig.** `_load_all_indexes_async` laster ned
+`SETTINGS_BLOBS` **over** de konfigurerte stiene. Peker de på file share-en, og
+blob-speilingen er aktiv, vinner blob-innholdet over share-en hver gang
+containeren starter.
+
+Derfor står `USE_BLOB_INDEXES=0` i dagens oppsett: det gir `ENABLED=False`, og
+hele blob-veien — både bootstrap-nedlastingen og speilingen av lagringer — er
+av. Indeksene leses rett fra mountet i stedet. **Ikke fjern den variabelen.**
+Uten den er standarden «på i Azure», og da overskrives file share-filene av
+gamle blobs ved neste containerstart.
+
+#### Azure OpenAI
+
+| Variabel | Merknad |
+|---|---|
+| `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_API_VERSION` | felles |
+| `AZURE_OPENAI_DEPLOYMENT_NAME` | standardmodell |
+| `AZURE_OPENAI_EXTRACT_DEPLOYMENT` | sterk modell, per-dokument-uttrekk |
+| `AZURE_OPENAI_AGGREGATE_DEPLOYMENT` | rask/billig modell, oppsummering |
+| `AZURE_OPENAI_EMBEDDINGS_ENDPOINT`, `_API_KEY`, `_API_VERSION`, `_MODEL`, `_DEPLOYMENT` | embeddings |
+
+#### Øvrige
+
+| Variabel | Standard |
+|---|---|
+| `CORS_ALLOWED_ORIGINS` | de to deployede klientene; komma-separert, uten skråstrek til slutt |
+| `SIMILARITY_CUTOFF` | `0.3` |
+| `MAX_UPLOAD_BYTES` | 100 MB |
+| `FETCH_URL_MAX_BYTES` | 100 MB |
+
+`WEBSITE_SITE_NAME` settes av plattformen og er det appen bruker til å avgjøre
+at den kjører i Azure. Ikke sett den manuelt.
+
+#### Verifisere oppsettet
+
+I **Development Tools → SSH**:
+
+```sh
+env | grep -E 'STORE_PATH|INDEX_STORAGE|DATA_DIR|CONTAINER_NAME|USE_BLOB'
+ls -l --time-style=full-iso /blobstorage/chatbot/*.json
+curl -s localhost:8000/admin/index-query-types
+```
+
+`curl`-en skal vise bank→mal-koblingene. Kommer `{}`, leser appen et annet sted
+enn du tror. I **Log stream** ved oppstart:
+
+```
+[config] LOCAL=False
+[config] INDEX_STORAGE=…
+[config] DOCUMENT_STORE_PATH (fallback)=…
+[config] BLOB_SYNC: enabled=…  in_azure=…  container=…
+```
+
+Den virkelige testen er å lagre en analysemal på en dokumentbank i klienten og
+se at tidsstempelet på `/blobstorage/chatbot/index_query_types.json` endrer seg.
+At du selv kan laste opp filer til share-en fra portalen beviser bare dine egne
+rettigheter — ikke at appen får skrive over SMB som sin egen bruker.
+
+#### Merk: JSON-filene i `utils/create_lab_vectorindex/` er sporet i git
+
+`custom_query_types.json`, `index_query_types.json`, `query_type_prompts.json`
+og `example_questions.json` ligger i repoet og følger med hver deploy. Så lenge
+stivariablene over er satt, er de bare seed-/utviklingsdata og rører ikke
+produksjon. Er de *ikke* satt, er det disse filene som er produksjonstilstanden,
+og enhver commit ruller produksjon tilbake.
 
 ## Redigerbare prompts per rapporttype
 
@@ -143,6 +261,11 @@ laget i veiviseren åpnes i veiviseren igjen når man trykker «Rediger».
 - **Azure** (eller lokalt med `USE_BLOB_INDEXES=true`): fila lastes ned fra
   blob-containeren ved oppstart, og hver lagring speiles tilbake til blob. Med
   `USE_BLOB_INDEXES=true` lokalt redigerer du altså **produksjonsdataene**.
+
+Hvor fila ligger i Azure styres av `PROMPTS_STORE_PATH`. Er den ikke satt,
+havner den i `/tmp` og forsvinner ved hver containerstart — gjelder tilsvarende
+for `CUSTOM_QT_STORE_PATH`, `INDEX_QT_STORE_PATH` og `EXAMPLES_STORE_PATH`. Se
+[App Service-oppsett](#app-service-oppsett-lagring-og-miljøvariabler).
 
 Her er kommandoen. document_store.json lastes opp som én fil til blob-roten, og koden har allerede en hjelper for det:
 .\.venv\Scripts\python.exe -c "from dotenv import load_dotenv, find_dotenv; load_dotenv(find_dotenv()); import os; os.environ['USE_BLOB_INDEXES']='true'; import azure_blob; print('container=', azure_blob.CONTAINER_NAME, 'enabled=', azure_blob.ENABLED); print('OK opplastet' if azure_blob.upload_document_store('./utils/create_lab_vectorindex/document_store.json') else 'FEILET — sjekk CONNECTION_STRING/CONTAINER_NAME')"

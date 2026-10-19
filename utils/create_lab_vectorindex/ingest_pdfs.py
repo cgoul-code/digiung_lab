@@ -28,9 +28,10 @@ from llama_index.core import (
 from llama_index.core.schema import Document
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
-from llama_index.readers.file import DocxReader, PDFReader, PptxReader
+from llama_index.readers.file import PDFReader, PptxReader
 
 import requests
+import docx  # python-docx — reads .docx structure (headings) for sectioning
 from bs4 import BeautifulSoup
 from urllib.parse import urlsplit, urlunsplit
 
@@ -333,6 +334,85 @@ def _upsert_docs_into_index(
     index.storage_context.persist(persist_dir=persist_dir)
     return index
 
+# ── DOCX loading ──────────────────────────────────────────────────────────────
+
+# A heading-less run longer than this many characters is split into its own
+# locatable section, so citations don't all point at one giant block.
+_DOCX_SECTION_CHARS = 1500
+
+
+def _is_docx_heading(style_name: str) -> bool:
+    """True for Word heading/title styles, including the Norwegian names Word
+    assigns when the UI language is Norwegian."""
+    s = (style_name or "").strip().lower()
+    return (s.startswith("heading") or s.startswith("overskrift")
+            or s in ("title", "tittel", "subtitle", "undertittel"))
+
+
+def _docx_blocks(path) -> list[tuple[str, str]]:
+    """(text, style_name) for every non-empty paragraph in a .docx, in order."""
+    document = docx.Document(str(path))
+    out = []
+    for p in document.paragraphs:
+        text = (p.text or "").strip()
+        if text:
+            out.append((text, (p.style.name if p.style else "") or ""))
+    return out
+
+
+def docx_full_text(path) -> str:
+    """All paragraph text of a .docx as one string (for metadata derivation)."""
+    return "\n\n".join(t for t, _ in _docx_blocks(path)).strip()
+
+
+def _load_docx_sections(path) -> list[Document]:
+    """Read a .docx into one Document per section, so a citation points at a
+    section rather than the whole file. Sections break at Word heading styles;
+    a document with no headings is grouped into ~fixed-size blocks instead. Each
+    section gets a running `page_label` locator (like a PDF page), and its
+    heading leads the text so the retrieved excerpt names the section."""
+    blocks = _docx_blocks(path)
+
+    sections: list[dict] = []
+    cur = {"title": "", "lines": []}
+    any_heading = False
+    for text, style in blocks:
+        if _is_docx_heading(style):
+            any_heading = True
+            if cur["title"] or cur["lines"]:
+                sections.append(cur)
+            cur = {"title": text, "lines": []}
+        else:
+            cur["lines"].append(text)
+    if cur["title"] or cur["lines"]:
+        sections.append(cur)
+
+    if not any_heading:
+        sections = []
+        block, size = [], 0
+        for text, _ in blocks:
+            block.append(text)
+            size += len(text)
+            if size >= _DOCX_SECTION_CHARS:
+                sections.append({"title": "", "lines": block})
+                block, size = [], 0
+        if block:
+            sections.append({"title": "", "lines": block})
+
+    docs: list[Document] = []
+    for i, sec in enumerate(sections, start=1):
+        body = "\n\n".join(sec["lines"]).strip()
+        title = sec["title"].strip()
+        text = (title + "\n\n" + body).strip() if title else body
+        if text:
+            docs.append(Document(text=text, metadata={"page_label": str(i)}))
+    if not docs:
+        raise ValueError(
+            "Fant ingen tekst i DOCX-dokumentet (kan være tomt eller bare bilder)."
+        )
+    return docs
+
+
 # ── PDF loading ───────────────────────────────────────────────────────────────
 
 def _apply_entry_metadata(doc: Document, entry: dict, source: str, filename: str) -> None:
@@ -530,14 +610,20 @@ def load_entry_as_documents(entry: dict, data_dir: str = None, index_name: str =
     pdf_path = _resolve_source_path(filnavn, data_dir=data_dir, index_name=index_name)
 
     suffix = pdf_path.suffix.lower()
-    if suffix in (".pptx", ".ppt"):
-        reader = PptxReader()
-    elif suffix == ".docx":
-        # Only the modern zip-based format; docx2txt cannot read legacy .doc.
-        reader = DocxReader()
+    if suffix == ".doc":
+        # Legacy binary Word — nothing here reads it; fail with guidance rather
+        # than hand it to the PDF reader and error cryptically.
+        raise ValueError(
+            "Gammelt Word-format (.doc) støttes ikke — konverter dokumentet til "
+            ".docx og last det opp på nytt."
+        )
+    if suffix == ".docx":
+        # Modern zip-based Word, split into sections for precise citations.
+        pages: list[Document] = _load_docx_sections(pdf_path)
+    elif suffix in (".pptx", ".ppt"):
+        pages = PptxReader().load_data(file=pdf_path)
     else:
-        reader = PDFReader()
-    pages: list[Document] = reader.load_data(file=pdf_path)
+        pages = PDFReader().load_data(file=pdf_path)
 
     for page_doc in pages:
         page_doc.doc_id = str(pdf_path)
