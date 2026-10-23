@@ -517,11 +517,15 @@ def load_documents(state: AggregateState) -> dict:
     if filters:
         def matches(entry):
             for key, value in filters.items():
-                entry_val = str(entry.get(key, "") or "").lower()
-                # Value may be comma-joined multi-select (e.g. "Tittel1,Tittel2")
-                # The entry matches if ANY of the selected values matches
+                # The field may itself hold several ';'-joined values; the options
+                # the user picks from are those split, trimmed parts. Match a
+                # selected value against a whole part — exactly, not as a substring,
+                # so "Opinion" no longer also matches "Opinion AS". Trimmed +
+                # lowercased on both sides to mirror the client's filter preview.
+                parts = {p.strip().lower()
+                         for p in str(entry.get(key, "") or "").split(";") if p.strip()}
                 selected = [v.strip().lower() for v in str(value).split(";") if v.strip()]
-                if not any(sel == entry_val or sel in entry_val for sel in selected):
+                if not any(sel in parts for sel in selected):
                     return False
             return True
         entries = [e for e in entries if matches(e)]
