@@ -20,6 +20,7 @@ Graph:
 import json
 import logging
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
 from typing import Any, Optional
@@ -394,6 +395,12 @@ def _language_directive(code: str) -> str:
     name, endonym = LANGUAGES.get(code or DEFAULT_LANGUAGE, LANGUAGES[DEFAULT_LANGUAGE])
     label = name if name == endonym else "%s (%s)" % (name, endonym)
     return _LANGUAGE_DIRECTIVE % (label, label)
+
+
+def _norm_title(title: str) -> str:
+    """A title reduced to its words, lowercase — what two spellings of the same
+    title still share."""
+    return " ".join(re.sub(r"[^\w]+", " ", (title or "").casefold()).split())
 
 
 def _doc_link(entry: dict, index_name: str) -> str:
@@ -871,27 +878,33 @@ def aggregate_findings(state: AggregateState) -> dict:
             for doc in per_doc for f in doc.findings
         ]
 
-    # Build title → sorted unique page numbers from retrieved chunks
-    pages_by_title: dict[str, list[int]] = {}
-    url_by_title: dict[str, str] = {}
+    # The synthesis names its sources by title, as the model wrote them — not
+    # always to the letter. Match on a normalised title, then on one title
+    # containing the other, so a source keeps its pages and link when the model
+    # drops a dash or changes case.
+    doc_by_title = {}
     for doc in per_doc:
-        pages = sorted({c.page for c in doc.chunks if c.page is not None})
-        if pages:
-            pages_by_title[doc.tittel] = pages
-        if doc.kilde_url:
-            url_by_title[doc.tittel] = doc.kilde_url
+        doc_by_title.setdefault(_norm_title(doc.tittel), doc)
 
-    link_by_title = {doc.tittel: doc.doc_link for doc in per_doc if doc.doc_link}
+    def _doc_for(tittel: str):
+        key = _norm_title(tittel)
+        if not key:
+            return None
+        if key in doc_by_title:
+            return doc_by_title[key]
+        near = [d for k, d in doc_by_title.items() if k and (key in k or k in key)]
+        return near[0] if len(near) == 1 else None
 
     def _enrich_sources(sources: list) -> list:
         enriched = []
         for src in sources:
             tittel = src if isinstance(src, str) else (src.get("tittel") or "")
+            doc = _doc_for(tittel)
             enriched.append({
                 "tittel":    tittel,
-                "pages":     pages_by_title.get(tittel, []),
-                "kilde_url": url_by_title.get(tittel, ""),
-                "doc_link":  link_by_title.get(tittel, ""),
+                "pages":     sorted({c.page for c in doc.chunks if c.page is not None}) if doc else [],
+                "kilde_url": doc.kilde_url if doc else "",
+                "doc_link":  doc.doc_link if doc else "",
             })
         return enriched
 

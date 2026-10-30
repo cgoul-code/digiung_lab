@@ -132,6 +132,11 @@ EXAMPLES_BLOB_NAME = "example_questions.json"
 # the folder name on disk and in blob, and part of every stored file path.
 BANK_LABELS_STORE_PATH = os.getenv("BANK_LABELS_STORE_PATH") or "./utils/create_lab_vectorindex/bank_labels.json"
 BANK_LABELS_BLOB_NAME = "bank_labels.json"
+# Skills: a prompt that answers a question from one search across the whole
+# bank, {key: {label, description, prompt, top_k, banks}}. The analysemaler
+# read every document; a skill reads the passages most like the question.
+SKILLS_STORE_PATH = os.getenv("SKILLS_STORE_PATH") or "./utils/create_lab_vectorindex/skills.json"
+SKILLS_BLOB_NAME = "skills.json"
 
 # Every store above that is written at runtime and mirrored to blob. Restored
 # on startup — add new stores here, or a deploy will revert them.
@@ -141,6 +146,7 @@ SETTINGS_BLOBS = (
     (INDEX_QT_BLOB_NAME,  INDEX_QT_STORE_PATH),
     (EXAMPLES_BLOB_NAME,  EXAMPLES_STORE_PATH),
     (BANK_LABELS_BLOB_NAME, BANK_LABELS_STORE_PATH),
+    (SKILLS_BLOB_NAME,    SKILLS_STORE_PATH),
 )
 
 print(f"[config] LOCAL={_LOCAL}", flush=True)
@@ -920,6 +926,116 @@ async def query():
         "filters":  body.get("filters") or {},
         "answer":   answer,
         "sources":  sources,
+    })
+
+
+@app.post("/skill/query")
+async def skill_query():
+    """Answer a question with a skill: one search across the bank, then the
+    skill's prompt over the passages found.
+
+    Body: {skill, question, index_name, filters?, language?}. The passages are
+    numbered in the prompt and returned in that order as `sources`, so an
+    answer's [n] points at sources[n-1]."""
+    from langchain_core.messages import SystemMessage, HumanMessage
+    from aggregate_workflow import LANGUAGES, DEFAULT_LANGUAGE, _doc_link
+
+    body = await request.get_json(force=True) or {}
+    index_name, entry, err = _index_or_error(body.get("index_name"))
+    if err:
+        return err
+
+    key = (body.get("skill") or "").strip()
+    with _skills_lock:
+        skill = _load_skills().get(key)
+    if not skill:
+        return jsonify({"error": f"Ukjent skill: {key}"}), 404
+    if index_name not in (skill.get("banks") or []):
+        return jsonify({"error": f"Skillen «{skill.get('label') or key}» er ikke slått på for denne dokumentbanken."}), 400
+
+    question = (body.get("question") or "").strip()
+    if not question:
+        return jsonify({"error": "Skriv et spørsmål — en skill svarer på spørsmålet, den har ingen egen oppgave å kjøre."}), 400
+
+    top_k = int(skill.get("top_k") or DEFAULT_SKILL_TOP_K)
+    user_filters = _build_filters(body.get("filters") or {})
+    active = _active_filenames(index_name)
+    active_filter = None
+    if active is not None:
+        if not active:
+            return jsonify({"question": question, "skill": key, "index_name": index_name,
+                            "answer": "Ingen aktive dokumenter i dokumentbanken.", "sources": []})
+        active_filter = MetadataFilter(key="filename", value=active, operator=FilterOperator.IN)
+    filters = _combine_and(user_filters, active_filter)
+
+    # The stored entry for each chunk's document, for its title and link.
+    with _doc_store_lock:
+        bank_entries = list(_load_full_doc_store().get(index_name) or [])
+    entry_by_file = {}
+    for e in bank_entries:
+        k = e.get("url") or os.path.basename((e.get("filnavn") or "").replace("\\", os.sep))
+        if k:
+            entry_by_file[k] = e
+
+    name, endonym = LANGUAGES.get(body.get("language") or DEFAULT_LANGUAGE, LANGUAGES[DEFAULT_LANGUAGE])
+    language = name if name == endonym else f"{name} ({endonym})"
+    system = skill["prompt"] + _SKILL_GROUNDING + f"\n\nSPRÅK: Skriv svaret på {language}."
+
+    def _run():
+        retriever = entry["index"].as_retriever(
+            similarity_top_k=top_k, similarity_cutoff=SIMILARITY_CUTOFF, filters=filters)
+        nodes = retriever.retrieve(question)
+        sources, blocks, seen = [], [], set()
+        for nws in nodes:
+            node = getattr(nws, "node", nws)
+            chunk_id = getattr(node, "id_", "") or getattr(node, "node_id", "")
+            if chunk_id in seen:
+                continue
+            seen.add(chunk_id)
+            meta = getattr(node, "metadata", {}) or {}
+            text = (getattr(node, "text", None) or "").strip()
+            filename = meta.get("filename", "")
+            doc = entry_by_file.get(filename) or {}
+            tittel = doc.get("tittel") or meta.get("tittel") or filename
+            page = meta.get("page_label") or meta.get("page")
+            n = len(sources) + 1
+            where = f", s. {page}" if page and str(filename).lower().endswith(".pdf") else ""
+            blocks.append(f"[{n}] {tittel}{where}\n{text}")
+            sources.append({
+                "n":                 n,
+                "filename":          filename,
+                "tittel":            tittel,
+                "publisert_av":      doc.get("publisert_av") or meta.get("publisert_av", ""),
+                "publisert_arstall": doc.get("publisert_arstall") or meta.get("publisert_arstall"),
+                "kilde_url":         doc.get("kilde_url") or meta.get("kilde_url", ""),
+                "doc_link":          _doc_link(doc, index_name) if doc else "",
+                "page_number":       page,
+                "score":             round(float(getattr(nws, "score", 0.0) or 0.0), 4),
+                "excerpt":           text[:600],
+                "deep_link":         _citation_link(
+                    meta.get("url"), meta.get("kilde_url"), meta.get("kilde_type"), page, text),
+            })
+        if not blocks:
+            return "Fant ingen tekst i dokumentbanken som ligner nok på spørsmålet til å svare.", sources
+        prompt = f"Spørsmål: {question}\n\nUtdrag fra dokumentbanken:\n\n" + "\n\n".join(blocks)
+        response = _extract_llm.invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
+        return (response.content or "").strip(), sources
+
+    loop = asyncio.get_event_loop()
+    try:
+        answer, sources = await loop.run_in_executor(None, _run)
+    except Exception as e:
+        logging.error("Skill query failed: %s", e, exc_info=True)
+        return jsonify({"error": "Søket med skillen feilet."}), 500
+
+    return jsonify({
+        "question":    question,
+        "skill":       key,
+        "skill_label": skill.get("label") or key,
+        "index_name":  index_name,
+        "filters":     body.get("filters") or {},
+        "answer":      answer,
+        "sources":     sources,
     })
 
 
@@ -2252,6 +2368,126 @@ def _save_bank_labels(data: dict) -> None:
     azure_blob.upload_file(BANK_LABELS_STORE_PATH, BANK_LABELS_BLOB_NAME)
 
 
+# ── Skills ────────────────────────────────────────────────────────────────────
+# A skill is written as a Markdown file: optional front matter for its name,
+# description and how many passages it reads, and the prompt as the body. The
+# file is the unit people pass around, so it imports and exports whole.
+
+_skills_lock = threading.Lock()
+
+MAX_SKILL_PROMPT_LEN = 30000
+DEFAULT_SKILL_TOP_K = 10
+MAX_SKILL_TOP_K = 30
+
+
+def _load_skills() -> dict:
+    if not os.path.isfile(SKILLS_STORE_PATH):
+        return {}
+    try:
+        with open(SKILLS_STORE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as e:
+        logging.warning("Could not read skills at %s: %s", SKILLS_STORE_PATH, e)
+        return {}
+
+
+def _save_skills(data: dict) -> None:
+    os.makedirs(os.path.dirname(SKILLS_STORE_PATH), exist_ok=True)
+    tmp = SKILLS_STORE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, SKILLS_STORE_PATH)
+    azure_blob.upload_file(SKILLS_STORE_PATH, SKILLS_BLOB_NAME)
+
+
+def _parse_skill_markdown(text: str) -> dict:
+    """A skill file → {label, description, top_k, prompt}.
+
+    Front matter is simple `key: value` lines between two `---` lines; `name`
+    and `label` both name the skill. Without front matter the first `# heading`
+    names it and the whole file is the prompt."""
+    text = (text or "").replace("\r\n", "\n").lstrip("﻿")
+    meta, body = {}, text
+    m = re.match(r"^---\n(.*?)\n---\n?(.*)$", text, re.S)
+    if m:
+        body = m.group(2)
+        for line in m.group(1).split("\n"):
+            k, sep, v = line.partition(":")
+            if sep:
+                meta[k.strip().lower()] = v.strip().strip('"\'')
+    out = {"prompt": body.strip()}
+    label = meta.get("label") or meta.get("name") or ""
+    if not label:
+        h = re.search(r"^#\s+(.+)$", body, re.M)
+        label = h.group(1).strip() if h else ""
+    out["label"] = label
+    out["description"] = meta.get("description", "")
+    if meta.get("top_k"):
+        out["top_k"] = meta["top_k"]
+    return out
+
+
+def _clean_skill(raw: dict, existing: Optional[dict] = None) -> dict:
+    """Validate a skill's fields, on top of what it already holds."""
+    skill = dict(existing or {})
+    for f in ("label", "description", "prompt"):
+        if f in raw:
+            v = raw.get(f)
+            if not isinstance(v, str):
+                raise ValueError(f"«{f}» må være tekst.")
+            skill[f] = v.strip()
+    if "top_k" in raw:
+        try:
+            top_k = int(raw.get("top_k"))
+        except (TypeError, ValueError):
+            raise ValueError("Antall tekstbiter må være et tall.")
+        skill["top_k"] = max(1, min(MAX_SKILL_TOP_K, top_k))
+    skill.setdefault("top_k", DEFAULT_SKILL_TOP_K)
+    if "banks" in raw:
+        banks = raw.get("banks")
+        if not isinstance(banks, list):
+            raise ValueError("«banks» må være en liste.")
+        skill["banks"] = sorted({b for b in banks if isinstance(b, str) and b})
+    skill.setdefault("banks", [])
+    skill.setdefault("description", "")
+
+    if not skill.get("label"):
+        raise ValueError("Skillen mangler et navn.")
+    if not skill.get("prompt"):
+        raise ValueError("Skillen mangler en prompt.")
+    if len(skill["prompt"]) > MAX_SKILL_PROMPT_LEN:
+        raise ValueError(f"Prompten kan være høyst {MAX_SKILL_PROMPT_LEN} tegn.")
+    return skill
+
+
+def _skill_key_from(label: str, taken) -> str:
+    """A key suggested from the name, the way the veiviser makes field keys."""
+    base = (label or "").lower()
+    for a, b in (("æ", "ae"), ("ø", "o"), ("å", "a")):
+        base = base.replace(a, b)
+    base = re.sub(r"[^a-z0-9]+", "_", base).strip("_")[:36] or "skill"
+    if len(base) < 2:
+        base = "skill"
+    key, n = base, 2
+    while key in taken:
+        key = f"{base}_{n}"
+        n += 1
+    return key
+
+
+# Appended to every skill's own prompt: the passages are all it has seen, so it
+# has to say where each claim comes from and say so when they fall short.
+_SKILL_GROUNDING = """
+
+KILDEGRUNNLAG FOR DETTE SVARET
+Du får utdrag fra dokumentbanken, nummerert [1], [2] osv. De er det eneste kunnskapsgrunnlaget du har tilgang til i dette svaret.
+- Bygg svaret på utdragene. Vis til kilden med nummeret i hakeparentes, f.eks. [2], rett etter det den støtter.
+- Ikke oppgi titler, sidetall, lenker eller sitater som ikke står i utdragene. Lenker til kildene legges på automatisk.
+- Hvis utdragene ikke er nok til å svare, eller bare dekker deler av spørsmålet, si det tydelig.
+- Skriv svaret i Markdown: overskrifter med ##, punktlister med -."""
+
+
 def _load_index_query_types() -> dict:
     if not os.path.isfile(INDEX_QT_STORE_PATH):
         return {}
@@ -2734,6 +2970,122 @@ async def admin_set_bank_label(index_name):
     return jsonify({"ok": True, "index_name": index_name, "label": label or index_name})
 
 
+@app.get("/skills")
+async def list_bank_skills():
+    """The skills one bank offers, without their prompts."""
+    name = request.args.get("index_name", "")
+    with _skills_lock:
+        skills = _load_skills()
+    out = [
+        {"key": k, "label": s.get("label") or k, "description": s.get("description", "")}
+        for k, s in skills.items() if name in (s.get("banks") or [])
+    ]
+    out.sort(key=lambda s: s["label"].casefold())
+    return jsonify(out)
+
+
+@app.get("/admin/skills")
+async def admin_list_skills():
+    """Every skill, in full."""
+    with _skills_lock:
+        skills = _load_skills()
+    out = [{"key": k, **s} for k, s in skills.items()]
+    out.sort(key=lambda s: (s.get("label") or s["key"]).casefold())
+    return jsonify({"skills": out})
+
+
+@app.post("/admin/skills")
+async def admin_create_skill():
+    """Create a skill from its fields, or from a Markdown file's text in
+    `markdown`. Fields sent alongside the file win over its front matter."""
+    body = await request.get_json(force=True) or {}
+    raw = {}
+    if isinstance(body.get("markdown"), str):
+        raw.update(_parse_skill_markdown(body["markdown"]))
+    for f in ("label", "description", "prompt", "top_k", "banks"):
+        if body.get(f) not in (None, ""):
+            raw[f] = body[f]
+    try:
+        skill = _clean_skill(raw)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    with _skills_lock:
+        skills = _load_skills()
+        key = (body.get("key") or "").strip().lower()
+        if key:
+            if not re.fullmatch(r"[a-z0-9_]{2,40}", key):
+                return jsonify({"error": "Ugyldig nøkkel. Bruk 2-40 tegn: små bokstaver, tall og understrek."}), 400
+            if key in skills:
+                return jsonify({"error": f"Skillen «{key}» finnes allerede."}), 409
+        else:
+            key = _skill_key_from(skill["label"], skills)
+        skills[key] = skill
+        _save_skills(skills)
+    return jsonify({"ok": True, "key": key, "skill": {"key": key, **skill}})
+
+
+@app.put("/admin/skills/<key>")
+async def admin_update_skill(key):
+    """Change a skill's fields; a Markdown file in `markdown` replaces the text
+    fields it carries. Banks are kept unless sent."""
+    body = await request.get_json(force=True) or {}
+    raw = {}
+    if isinstance(body.get("markdown"), str):
+        raw.update({k: v for k, v in _parse_skill_markdown(body["markdown"]).items() if v})
+    for f in ("label", "description", "prompt", "top_k", "banks"):
+        if f in body:
+            raw[f] = body[f]
+    with _skills_lock:
+        skills = _load_skills()
+        if key not in skills:
+            return jsonify({"error": f"Ukjent skill: {key}"}), 404
+        try:
+            skills[key] = _clean_skill(raw, skills[key])
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        _save_skills(skills)
+        skill = skills[key]
+    return jsonify({"ok": True, "key": key, "skill": {"key": key, **skill}})
+
+
+@app.delete("/admin/skills/<key>")
+async def admin_delete_skill(key):
+    with _skills_lock:
+        skills = _load_skills()
+        if skills.pop(key, None) is None:
+            return jsonify({"error": f"Ukjent skill: {key}"}), 404
+        _save_skills(skills)
+    return jsonify({"ok": True, "key": key})
+
+
+@app.put("/admin/index-skills/<index_name>")
+async def admin_set_index_skills(index_name):
+    """Set which skills a bank offers — the bank is added to or dropped from
+    each skill's own list."""
+    try:
+        _safe_index_name(index_name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    body = await request.get_json(force=True) or {}
+    wanted = body.get("skills")
+    if not isinstance(wanted, list):
+        return jsonify({"error": "Forventet 'skills' som liste"}), 400
+    wanted = {k for k in wanted if isinstance(k, str)}
+    with _skills_lock:
+        skills = _load_skills()
+        for k, s in skills.items():
+            banks = set(s.get("banks") or [])
+            if k in wanted:
+                banks.add(index_name)
+            else:
+                banks.discard(index_name)
+            s["banks"] = sorted(banks)
+        _save_skills(skills)
+        on = sorted(k for k in wanted if k in skills)
+    return jsonify({"ok": True, "index_name": index_name, "skills": on})
+
+
 @app.get("/admin/index-query-types")
 async def admin_index_query_types():
     """Return the per-index list of enabled analysetyper as {index_name: [keys]}.
@@ -2918,6 +3270,20 @@ async def admin_delete_index():
                 _save_bank_labels(labels)
     except Exception as e:
         logging.warning("Could not drop label for %s: %s", name, e)
+
+    # Skills switched on for it — same reason.
+    try:
+        with _skills_lock:
+            skills = _load_skills()
+            touched = False
+            for s in skills.values():
+                if name in (s.get("banks") or []):
+                    s["banks"] = [b for b in s["banks"] if b != name]
+                    touched = True
+            if touched:
+                _save_skills(skills)
+    except Exception as e:
+        logging.warning("Could not drop skills for %s: %s", name, e)
 
     # Drop it from the loaded set so /query and /health stop advertising it.
     _indexes.pop(name, None)
