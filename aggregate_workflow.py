@@ -396,6 +396,20 @@ def _language_directive(code: str) -> str:
     return _LANGUAGE_DIRECTIVE % (label, label)
 
 
+def _doc_link(entry: dict, index_name: str) -> str:
+    """Where a reader opens the document an analysis read: the web page for a
+    URL entry, otherwise the stored file, served by /document/file. The path is
+    server-relative — the client knows which server it talks to."""
+    from urllib.parse import urlencode
+    if entry.get("url") and not entry.get("filnavn"):
+        return entry["url"]
+    # Same key /document/file looks the entry up by.
+    key = entry.get("url") or entry.get("filnavn") or ""
+    if not key or not index_name:
+        return ""
+    return "/document/file?" + urlencode({"index_name": index_name, "key": key})
+
+
 # ── State ─────────────────────────────────────────────────────────────────────
 
 class ChunkRef(BaseModel):
@@ -407,6 +421,7 @@ class DocFindings(BaseModel):
     filename:           str
     kilde_url:          str            = ""
     kilde_type:         str            = ""   # "pdf" | "html" for materialized sources
+    doc_link:           str            = ""   # the document itself: web URL, or server path to the stored file
     publisert_av:       str            = ""
     publisert_arstall:  Optional[int]  = None
     findings:           list[str]      = Field(default_factory=list)
@@ -716,6 +731,7 @@ def extract_per_document(state: AggregateState) -> dict:
                 filename=filename,
                 kilde_url=(entry.get("kilde_url") or ""),
                 kilde_type=(entry.get("kilde_type") or ""),
+                doc_link=_doc_link(entry, state.get("index_name") or ""),
                 publisert_av=(entry.get("publisert_av") or ""),
                 publisert_arstall=ar_int,
                 findings=findings,
@@ -865,6 +881,8 @@ def aggregate_findings(state: AggregateState) -> dict:
         if doc.kilde_url:
             url_by_title[doc.tittel] = doc.kilde_url
 
+    link_by_title = {doc.tittel: doc.doc_link for doc in per_doc if doc.doc_link}
+
     def _enrich_sources(sources: list) -> list:
         enriched = []
         for src in sources:
@@ -873,6 +891,7 @@ def aggregate_findings(state: AggregateState) -> dict:
                 "tittel":    tittel,
                 "pages":     pages_by_title.get(tittel, []),
                 "kilde_url": url_by_title.get(tittel, ""),
+                "doc_link":  link_by_title.get(tittel, ""),
             })
         return enriched
 

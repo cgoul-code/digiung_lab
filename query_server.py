@@ -128,6 +128,10 @@ INDEX_QT_STORE_PATH = os.getenv("INDEX_QT_STORE_PATH") or "./utils/create_lab_ve
 INDEX_QT_BLOB_NAME = "index_query_types.json"
 EXAMPLES_STORE_PATH = os.getenv("EXAMPLES_STORE_PATH") or "./utils/create_lab_vectorindex/example_questions.json"
 EXAMPLES_BLOB_NAME = "example_questions.json"
+# Display names for the banks, {index_name: label}. The key itself stays: it is
+# the folder name on disk and in blob, and part of every stored file path.
+BANK_LABELS_STORE_PATH = os.getenv("BANK_LABELS_STORE_PATH") or "./utils/create_lab_vectorindex/bank_labels.json"
+BANK_LABELS_BLOB_NAME = "bank_labels.json"
 
 # Every store above that is written at runtime and mirrored to blob. Restored
 # on startup — add new stores here, or a deploy will revert them.
@@ -136,6 +140,7 @@ SETTINGS_BLOBS = (
     (CUSTOM_QT_BLOB_NAME, CUSTOM_QT_STORE_PATH),
     (INDEX_QT_BLOB_NAME,  INDEX_QT_STORE_PATH),
     (EXAMPLES_BLOB_NAME,  EXAMPLES_STORE_PATH),
+    (BANK_LABELS_BLOB_NAME, BANK_LABELS_STORE_PATH),
 )
 
 print(f"[config] LOCAL={_LOCAL}", flush=True)
@@ -1007,6 +1012,7 @@ async def aggregate_stream():
                     "tittel":            f.tittel,
                     "filename":          f.filename,
                     "kilde_url":         f.kilde_url,
+                    "doc_link":          f.doc_link,
                     "publisert_av":      f.publisert_av,
                     "publisert_arstall": f.publisert_arstall,
                     "findings":          f.findings,
@@ -2220,6 +2226,32 @@ def _save_example_questions(data: dict) -> None:
     azure_blob.upload_file(EXAMPLES_STORE_PATH, EXAMPLES_BLOB_NAME)
 
 
+_bank_labels_lock = threading.Lock()
+
+MAX_BANK_LABEL_LEN = 80
+
+
+def _load_bank_labels() -> dict:
+    if not os.path.isfile(BANK_LABELS_STORE_PATH):
+        return {}
+    try:
+        with open(BANK_LABELS_STORE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as e:
+        logging.warning("Could not read bank labels at %s: %s", BANK_LABELS_STORE_PATH, e)
+        return {}
+
+
+def _save_bank_labels(data: dict) -> None:
+    os.makedirs(os.path.dirname(BANK_LABELS_STORE_PATH), exist_ok=True)
+    tmp = BANK_LABELS_STORE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, BANK_LABELS_STORE_PATH)
+    azure_blob.upload_file(BANK_LABELS_STORE_PATH, BANK_LABELS_BLOB_NAME)
+
+
 def _load_index_query_types() -> dict:
     if not os.path.isfile(INDEX_QT_STORE_PATH):
         return {}
@@ -2286,7 +2318,10 @@ def _effective_cfg(query_type: str) -> dict:
     return eff.get(query_type) or eff.get("free")
 
 
+# /document/file is the same file as /admin/file, for the source links in an
+# analysis: those are read by everyone who runs one, not only by admins.
 @app.get("/admin/file")
+@app.get("/document/file")
 async def admin_get_file():
     """Return a document stored for a bank, for viewing or downloading.
 
@@ -2655,6 +2690,50 @@ async def admin_set_example_questions(index_name):
                     "questions": questions, "using_defaults": not questions})
 
 
+# Not under /admin: everyone who picks a bank sees its name.
+@app.get("/bank-labels")
+async def bank_labels():
+    """Display names as {index_name: label}. A bank without one shows its key."""
+    with _bank_labels_lock:
+        return jsonify(_load_bank_labels())
+
+
+@app.put("/admin/bank-labels/<index_name>")
+async def admin_set_bank_label(index_name):
+    """Rename a bank as it is shown. An empty label goes back to the key."""
+    try:
+        _safe_index_name(index_name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    with _doc_store_lock:
+        known = _load_full_doc_store()
+    if index_name not in known:
+        return jsonify({"error": f"Ukjent dokumentbank: {index_name}"}), 404
+
+    body = await request.get_json(force=True) or {}
+    label = body.get("label")
+    if not isinstance(label, str):
+        return jsonify({"error": "Forventet 'label' som tekst"}), 400
+    label = " ".join(label.split())
+    if len(label) > MAX_BANK_LABEL_LEN:
+        return jsonify({"error": f"Navnet kan være høyst {MAX_BANK_LABEL_LEN} tegn."}), 400
+
+    with _bank_labels_lock:
+        data = _load_bank_labels()
+        taken = {v.casefold() for k, v in data.items() if k != index_name}
+        taken |= {k.casefold() for k in known if k != index_name}
+        if label and label.casefold() in taken:
+            return jsonify({"error": f"«{label}» er allerede navnet på en annen dokumentbank."}), 409
+        if label and label != index_name:
+            data[index_name] = label
+        else:
+            data.pop(index_name, None)
+        _save_bank_labels(data)
+
+    return jsonify({"ok": True, "index_name": index_name, "label": label or index_name})
+
+
 @app.get("/admin/index-query-types")
 async def admin_index_query_types():
     """Return the per-index list of enabled analysetyper as {index_name: [keys]}.
@@ -2830,6 +2909,15 @@ async def admin_delete_index():
                 _save_index_query_types(qt_map)
     except Exception as e:
         logging.warning("Could not drop query types for %s: %s", name, e)
+
+    # Display name — a new bank created under the same key starts without it.
+    try:
+        with _bank_labels_lock:
+            labels = _load_bank_labels()
+            if labels.pop(name, None) is not None:
+                _save_bank_labels(labels)
+    except Exception as e:
+        logging.warning("Could not drop label for %s: %s", name, e)
 
     # Drop it from the loaded set so /query and /health stop advertising it.
     _indexes.pop(name, None)
