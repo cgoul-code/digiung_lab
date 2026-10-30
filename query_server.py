@@ -16,7 +16,6 @@ Endpoints:
     GET  /index/info    → basic stats about the loaded index
     POST /query         → ask a question, get an answer + sources
 """
-
 import asyncio
 import base64
 import datetime
