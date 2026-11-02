@@ -82,10 +82,15 @@ eller kopiere noe der, bruk **Development Tools → SSH**.
 | `INDEX_QT_STORE_PATH` | `/blobstorage/chatbot/index_query_types.json` | `/tmp` — koblingen bank→maler forsvinner |
 | `PROMPTS_STORE_PATH` | `/blobstorage/chatbot/query_type_prompts.json` | `/tmp` — prompt-overstyringer forsvinner |
 | `EXAMPLES_STORE_PATH` | `/blobstorage/chatbot/example_questions.json` | `/tmp` — forslagsspørsmålene forsvinner |
+| `BANK_LABELS_STORE_PATH` | *(valgfri)* | mappa til `DOCUMENT_STORE_PATH` — visningsnavn på bankene |
+| `SKILLS_STORE_PATH` | *(valgfri)* | mappa til `DOCUMENT_STORE_PATH` — skills og hvilke banker de er på for |
 | `INDEX_STORAGE` | `/blobstorage/chatbot/indexes` | faller til `/blobstorage/chatbot` |
 | `DATA_DIR` | `/blobstorage/chatbot/data` | faller til `/data` — efemer |
 
-Alle sju er bekreftet satt i dagens App Settings.
+De sju første er bekreftet satt i dagens App Settings. En innstillingsfil uten
+egen `*_STORE_PATH` havner i Azure ved siden av `DOCUMENT_STORE_PATH` (eller i
+`SETTINGS_DIR` om den er satt), altså på mountet. Nye lagre trenger derfor ingen
+ny app-setting. Oppstartsloggen viser stien til hver fil (`[config] settings …`).
 
 #### Blob-speiling — valgfri, og den overstyrer file share-en
 

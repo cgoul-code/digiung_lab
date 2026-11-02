@@ -114,27 +114,41 @@ if _LOCAL:
 _doc_store_env = os.getenv("DOCUMENT_STORE_PATH")
 DOCUMENT_STORE_PATH = _doc_store_env or "./utils/create_lab_vectorindex/document_store.json"
 
+# Where a settings store lives unless its own *_STORE_PATH says otherwise. In
+# Azure the app folder is wiped on every restart and deploy; only the mounted
+# share survives, so a store without its own app setting goes next to
+# document_store.json there. Locally it stays in the repo folder.
+_LOCAL_SETTINGS_DIR = "./utils/create_lab_vectorindex"
+SETTINGS_DIR = os.getenv("SETTINGS_DIR") or (
+    _LOCAL_SETTINGS_DIR if _LOCAL or not _doc_store_env else os.path.dirname(_doc_store_env)
+)
+
+
+def _settings_path(env_var: str, filename: str) -> str:
+    return os.getenv(env_var) or os.path.join(SETTINGS_DIR, filename)
+
+
 # Editable per-query-type prompt overrides (persisted + mirrored to blob).
-PROMPTS_STORE_PATH = os.getenv("PROMPTS_STORE_PATH") or "./utils/create_lab_vectorindex/query_type_prompts.json"
+PROMPTS_STORE_PATH = _settings_path("PROMPTS_STORE_PATH", "query_type_prompts.json")
 PROMPTS_BLOB_NAME = "query_type_prompts.json"
-CUSTOM_QT_STORE_PATH = os.getenv("CUSTOM_QT_STORE_PATH") or "./utils/create_lab_vectorindex/custom_query_types.json"
+CUSTOM_QT_STORE_PATH = _settings_path("CUSTOM_QT_STORE_PATH", "custom_query_types.json")
 CUSTOM_QT_BLOB_NAME = "custom_query_types.json"
 EDITABLE_PROMPT_FIELDS = ("extract_system", "extract_prompt", "aggregate_system", "aggregate_prompt")
 
 # Per-index list of enabled analysetyper (query types). Maps {index_name: [keys]}.
 # An index without an entry falls back to the client's built-in defaults.
-INDEX_QT_STORE_PATH = os.getenv("INDEX_QT_STORE_PATH") or "./utils/create_lab_vectorindex/index_query_types.json"
+INDEX_QT_STORE_PATH = _settings_path("INDEX_QT_STORE_PATH", "index_query_types.json")
 INDEX_QT_BLOB_NAME = "index_query_types.json"
-EXAMPLES_STORE_PATH = os.getenv("EXAMPLES_STORE_PATH") or "./utils/create_lab_vectorindex/example_questions.json"
+EXAMPLES_STORE_PATH = _settings_path("EXAMPLES_STORE_PATH", "example_questions.json")
 EXAMPLES_BLOB_NAME = "example_questions.json"
 # Display names for the banks, {index_name: label}. The key itself stays: it is
 # the folder name on disk and in blob, and part of every stored file path.
-BANK_LABELS_STORE_PATH = os.getenv("BANK_LABELS_STORE_PATH") or "./utils/create_lab_vectorindex/bank_labels.json"
+BANK_LABELS_STORE_PATH = _settings_path("BANK_LABELS_STORE_PATH", "bank_labels.json")
 BANK_LABELS_BLOB_NAME = "bank_labels.json"
 # Skills: a prompt that answers a question from one search across the whole
 # bank, {key: {label, description, prompt, top_k, banks}}. The analysemaler
 # read every document; a skill reads the passages most like the question.
-SKILLS_STORE_PATH = os.getenv("SKILLS_STORE_PATH") or "./utils/create_lab_vectorindex/skills.json"
+SKILLS_STORE_PATH = _settings_path("SKILLS_STORE_PATH", "skills.json")
 SKILLS_BLOB_NAME = "skills.json"
 
 # Every store above that is written at runtime and mirrored to blob. Restored
@@ -152,6 +166,8 @@ print(f"[config] LOCAL={_LOCAL}", flush=True)
 print(f"[config] INDEX_STORAGE={INDEX_STORAGE}", flush=True)
 print(f"[config] DATA_DIR={DATA_DIR}", flush=True)
 print(f"[config] DOCUMENT_STORE_PATH (fallback)={DOCUMENT_STORE_PATH}", flush=True)
+for _blob_name, _path in SETTINGS_BLOBS:
+    print(f"[config] settings {_blob_name} -> {_path}", flush=True)
 print(f"[config] BLOB_SYNC: enabled={azure_blob.ENABLED}  in_azure={azure_blob.IN_AZURE}  container={azure_blob.CONTAINER_NAME!r}", flush=True)
 
 # All metadata fields that can be filtered on
