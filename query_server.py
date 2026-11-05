@@ -949,10 +949,15 @@ async def skill_query():
     """Answer a question with a skill: one search across the bank, then the
     skill's prompt over the passages found.
 
-    Body: {skill, question, index_name, filters?, language?}. The passages are
-    numbered in the prompt and returned in that order as `sources`, so an
-    answer's [n] points at sources[n-1]."""
-    from langchain_core.messages import SystemMessage, HumanMessage
+    Body: {skill, question, index_name, filters?, language?, history?}. The
+    passages are numbered in the prompt and returned in that order as `sources`,
+    so an answer's [n] points at sources[n-1].
+
+    `history` ([{question, answer}], oldest first) makes it a conversation: the
+    server keeps no session — the client sends the earlier turns. A follow-up is
+    then rewritten into a standalone search before retrieval, and the earlier
+    turns go to the model as context."""
+    from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
     from aggregate_workflow import LANGUAGES, DEFAULT_LANGUAGE, _doc_link
 
     body = await request.get_json(force=True) or {}
@@ -994,12 +999,31 @@ async def skill_query():
 
     name, endonym = LANGUAGES.get(body.get("language") or DEFAULT_LANGUAGE, LANGUAGES[DEFAULT_LANGUAGE])
     language = name if name == endonym else f"{name} ({endonym})"
-    system = skill["prompt"] + _SKILL_GROUNDING + f"\n\nSPRÅK: Skriv svaret på {language}."
+    history = _skill_history(body.get("history"))
+    system = (skill["prompt"] + _SKILL_GROUNDING + (_SKILL_CHAT_NOTE if history else "")
+              + f"\n\nSPRÅK: Skriv svaret på {language}.")
+
+    def _search_query():
+        # "Hva med det andre?" finds nothing on its own; spell it out first.
+        if not history:
+            return question
+        convo = "\n\n".join(f"Spørsmål: {q}\nSvar: {a[:800]}" for q, a in history)
+        try:
+            out = _extract_llm.invoke([
+                SystemMessage(content=_SKILL_CONDENSE_PROMPT),
+                HumanMessage(content=f"Samtalen så langt:\n\n{convo}\n\nOppfølgingsspørsmål: {question}"),
+            ])
+            rewritten = (out.content or "").strip().strip('"«»').strip()
+            return rewritten[:500] or question
+        except Exception as e:
+            logging.warning("Skill follow-up rewrite failed, searching the question as asked: %s", e)
+            return question
 
     def _run():
+        search_query = _search_query()
         retriever = entry["index"].as_retriever(
             similarity_top_k=top_k, similarity_cutoff=SIMILARITY_CUTOFF, filters=filters)
-        nodes = retriever.retrieve(question)
+        nodes = retriever.retrieve(search_query)
         sources, blocks, seen = [], [], set()
         for nws in nodes:
             node = getattr(nws, "node", nws)
@@ -1031,14 +1055,18 @@ async def skill_query():
                     meta.get("url"), meta.get("kilde_url"), meta.get("kilde_type"), page, text),
             })
         if not blocks:
-            return "Fant ingen tekst i dokumentbanken som ligner nok på spørsmålet til å svare.", sources
+            return "Fant ingen tekst i dokumentbanken som ligner nok på spørsmålet til å svare.", sources, search_query
         prompt = f"Spørsmål: {question}\n\nUtdrag fra dokumentbanken:\n\n" + "\n\n".join(blocks)
-        response = _extract_llm.invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
-        return (response.content or "").strip(), sources
+        messages = [SystemMessage(content=system)]
+        for q, a in history:
+            messages += [HumanMessage(content=q), AIMessage(content=a)]
+        messages.append(HumanMessage(content=prompt))
+        response = _extract_llm.invoke(messages)
+        return (response.content or "").strip(), sources, search_query
 
     loop = asyncio.get_event_loop()
     try:
-        answer, sources = await loop.run_in_executor(None, _run)
+        answer, sources, search_query = await loop.run_in_executor(None, _run)
     except Exception as e:
         logging.error("Skill query failed: %s", e, exc_info=True)
         return jsonify({"error": "Søket med skillen feilet."}), 500
@@ -1051,6 +1079,9 @@ async def skill_query():
         "filters":     body.get("filters") or {},
         "answer":      answer,
         "sources":     sources,
+        # What was actually searched — differs from `question` for a follow-up.
+        "search_query": search_query,
+        "turn":        len(history) + 1,
     })
 
 
@@ -2501,6 +2532,37 @@ Du får utdrag fra dokumentbanken, nummerert [1], [2] osv. De er det eneste kunn
 - Ikke oppgi titler, sidetall, lenker eller sitater som ikke står i utdragene. Lenker til kildene legges på automatisk.
 - Hvis utdragene ikke er nok til å svare, eller bare dekker deler av spørsmålet, si det tydelig.
 - Skriv svaret i Markdown: overskrifter med ##, punktlister med -."""
+
+# Appended in samtalemodus: earlier answers cited passages the model no longer sees.
+_SKILL_CHAT_NOTE = """
+
+SAMTALE
+Dette er en samtale. De tidligere spørsmålene og svarene er med som sammenheng, slik at du kan forstå oppfølgingsspørsmål.
+- Utdragene i siste melding er hentet på nytt for det siste spørsmålet. Henvis bare til dem med [n].
+- Ikke gjenta tidligere svar; svar på det som spørres om nå, og bygg videre på samtalen der det passer."""
+
+_SKILL_CONDENSE_PROMPT = """Du gjør om et oppfølgingsspørsmål i en samtale til ett selvstendig søk i en dokumentbank.
+Skriv spørsmålet om slik at det kan forstås uten samtalen: sett inn hva «det», «dette», «de» osv. viser til.
+Hvis spørsmålet allerede står på egne ben, skriv det uendret.
+Svar bare med søket, på samme språk som spørsmålet, uten forklaring."""
+
+SKILL_HISTORY_TURNS = 6          # earlier turns sent to the model
+SKILL_HISTORY_ANSWER_CHARS = 3000
+
+
+def _skill_history(raw) -> list:
+    """The earlier turns of a skill conversation, cleaned: the last few, cut to
+    size, with their [n] markers removed — those pointed at passages from an
+    earlier search, which would clash with the numbering of this one."""
+    turns = []
+    for t in (raw if isinstance(raw, list) else [])[-SKILL_HISTORY_TURNS:]:
+        if not isinstance(t, dict):
+            continue
+        q = str(t.get("question") or "").strip()[:1000]
+        a = re.sub(r"\s*\[\d+(?:\s*[,–-]\s*\d+)*\]", "", str(t.get("answer") or "")).strip()
+        if q and a:
+            turns.append((q, a[:SKILL_HISTORY_ANSWER_CHARS]))
+    return turns
 
 
 def _load_index_query_types() -> dict:
