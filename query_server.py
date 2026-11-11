@@ -949,6 +949,8 @@ async def skill_query():
     """Answer a question with a skill: one search across the bank, then the
     skill's prompt over the passages found.
 
+    A skill marked `dialog` may also ask the user back instead of answering.
+
     Body: {skill, question, index_name, filters?, language?, history?}. The
     passages are numbered in the prompt and returned in that order as `sources`,
     so an answer's [n] points at sources[n-1].
@@ -1000,7 +1002,9 @@ async def skill_query():
     name, endonym = LANGUAGES.get(body.get("language") or DEFAULT_LANGUAGE, LANGUAGES[DEFAULT_LANGUAGE])
     language = name if name == endonym else f"{name} ({endonym})"
     history = _skill_history(body.get("history"))
+    dialog = bool(skill.get("dialog"))
     system = (skill["prompt"] + _SKILL_GROUNDING + (_SKILL_CHAT_NOTE if history else "")
+              + (_SKILL_DIALOG_NOTE if dialog else "")
               + f"\n\nSPRÅK: Skriv svaret på {language}.")
 
     def _search_query():
@@ -1054,9 +1058,14 @@ async def skill_query():
                 "deep_link":         _citation_link(
                     meta.get("url"), meta.get("kilde_url"), meta.get("kilde_type"), page, text),
             })
-        if not blocks:
+        if not blocks and not dialog:
             return "Fant ingen tekst i dokumentbanken som ligner nok på spørsmålet til å svare.", sources, search_query
-        prompt = f"Spørsmål: {question}\n\nUtdrag fra dokumentbanken:\n\n" + "\n\n".join(blocks)
+        if blocks:
+            prompt = f"Spørsmål: {question}\n\nUtdrag fra dokumentbanken:\n\n" + "\n\n".join(blocks)
+        else:
+            # A dialogbasert skill gets to ask what the user is after instead.
+            prompt = (f"Spørsmål: {question}\n\nSøket fant ingen utdrag i dokumentbanken som ligner nok på "
+                      "spørsmålet. Du har derfor ikke noe kildegrunnlag for et faglig svar nå.")
         messages = [SystemMessage(content=system)]
         for q, a in history:
             messages += [HumanMessage(content=q), AIMessage(content=a)]
@@ -1082,6 +1091,7 @@ async def skill_query():
         # What was actually searched — differs from `question` for a follow-up.
         "search_query": search_query,
         "turn":        len(history) + 1,
+        "dialog":      dialog,
     })
 
 
@@ -2471,7 +2481,15 @@ def _parse_skill_markdown(text: str) -> dict:
     out["description"] = meta.get("description", "")
     if meta.get("top_k"):
         out["top_k"] = meta["top_k"]
+    if meta.get("dialog"):
+        out["dialog"] = meta["dialog"]
     return out
+
+
+def _as_bool(v) -> bool:
+    if isinstance(v, str):
+        return v.strip().lower() in ("true", "ja", "yes", "1", "on")
+    return bool(v)
 
 
 def _clean_skill(raw: dict, existing: Optional[dict] = None) -> dict:
@@ -2490,6 +2508,10 @@ def _clean_skill(raw: dict, existing: Optional[dict] = None) -> dict:
             raise ValueError("Antall tekstbiter må være et tall.")
         skill["top_k"] = max(1, min(MAX_SKILL_TOP_K, top_k))
     skill.setdefault("top_k", DEFAULT_SKILL_TOP_K)
+    # A dialogbasert skill always runs as a samtale and may ask the user back.
+    if "dialog" in raw:
+        skill["dialog"] = _as_bool(raw.get("dialog"))
+    skill.setdefault("dialog", False)
     if "banks" in raw:
         banks = raw.get("banks")
         if not isinstance(banks, list):
@@ -2541,8 +2563,20 @@ Dette er en samtale. De tidligere spørsmålene og svarene er med som sammenheng
 - Utdragene i siste melding er hentet på nytt for det siste spørsmålet. Henvis bare til dem med [n].
 - Ikke gjenta tidligere svar; svar på det som spørres om nå, og bygg videre på samtalen der det passer."""
 
+# Appended for a dialogbasert skill, from the first turn on.
+_SKILL_DIALOG_NOTE = """
+
+DIALOG
+Du fører en dialog med brukeren, og kan stille spørsmål tilbake.
+- Hvis spørsmålet er uklart, for vidt, eller kan forstås på flere måter som ville gitt ulike svar: still ett til tre korte, konkrete oppklarende spørsmål i stedet for å gjette. Gi da ikke et fullt svar i samme melding.
+- Er spørsmålet klart nok, svar direkte. Ikke spør om noe som allerede fremgår av samtalen, og ikke spør mer enn nødvendig.
+- Når brukeren svarer på et spørsmål du har stilt, bruk svaret sammen med det opprinnelige spørsmålet og svar på saken.
+- Hvis søket ikke ga noen utdrag, si det kort og spør hva brukeren er ute etter, eller foreslå hvordan spørsmålet kan presiseres.
+- Etter et svar kan du, når det er naturlig, avslutte med ett kort forslag til hva brukeren kan spørre videre om."""
+
 _SKILL_CONDENSE_PROMPT = """Du gjør om et oppfølgingsspørsmål i en samtale til ett selvstendig søk i en dokumentbank.
 Skriv spørsmålet om slik at det kan forstås uten samtalen: sett inn hva «det», «dette», «de» osv. viser til.
+Hvis den siste meldingen er et svar på et oppklarende spørsmål fra assistenten, lag søket av det opprinnelige spørsmålet presisert med svaret.
 Hvis spørsmålet allerede står på egne ben, skriv det uendret.
 Svar bare med søket, på samme språk som spørsmålet, uten forklaring."""
 
@@ -3054,7 +3088,8 @@ async def list_bank_skills():
     with _skills_lock:
         skills = _load_skills()
     out = [
-        {"key": k, "label": s.get("label") or k, "description": s.get("description", "")}
+        {"key": k, "label": s.get("label") or k, "description": s.get("description", ""),
+         "dialog": bool(s.get("dialog"))}
         for k, s in skills.items() if name in (s.get("banks") or [])
     ]
     out.sort(key=lambda s: s["label"].casefold())
@@ -3079,7 +3114,7 @@ async def admin_create_skill():
     raw = {}
     if isinstance(body.get("markdown"), str):
         raw.update(_parse_skill_markdown(body["markdown"]))
-    for f in ("label", "description", "prompt", "top_k", "banks"):
+    for f in ("label", "description", "prompt", "top_k", "dialog", "banks"):
         if body.get(f) not in (None, ""):
             raw[f] = body[f]
     try:
@@ -3110,7 +3145,7 @@ async def admin_update_skill(key):
     raw = {}
     if isinstance(body.get("markdown"), str):
         raw.update({k: v for k, v in _parse_skill_markdown(body["markdown"]).items() if v})
-    for f in ("label", "description", "prompt", "top_k", "banks"):
+    for f in ("label", "description", "prompt", "top_k", "dialog", "banks"):
         if f in body:
             raw[f] = body[f]
     with _skills_lock:
