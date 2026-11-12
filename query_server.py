@@ -62,6 +62,14 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
+# The Azure SDK logs every HTTP request at INFO. With Application Insights on,
+# the exporter's own requests and failures were logged, picked up as telemetry,
+# exported and logged again — one round a second. Keep the exporter's messages
+# on the console only, and drop the per-request lines.
+logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
+_ai_exporter_log = logging.getLogger("azure.monitor.opentelemetry.exporter")
+_ai_exporter_log.propagate = False
+_ai_exporter_log.addHandler(logging.StreamHandler())
 
 # ── Environment detection ─────────────────────────────────────────────────────
 
@@ -202,25 +210,29 @@ Settings.llm = AzureOpenAI(
 
 Settings.text_splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=128)
 
-# Strong model for per-document extraction (set AZURE_OPENAI_EXTRACT_DEPLOYMENT to override)
-_extract_llm = AzureChatOpenAI(
-    azure_deployment=os.getenv("AZURE_OPENAI_EXTRACT_DEPLOYMENT"),
-    api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-    temperature=0.0,
-    timeout=120,
-)
+# Deployments that only accept the default temperature and answer 400 to
+# temperature=0.0 (the GPT-6 series and the o-series). Matched on the
+# deployment name; override with AZURE_OPENAI_NO_TEMPERATURE_PATTERN.
+_NO_TEMPERATURE = re.compile(os.getenv("AZURE_OPENAI_NO_TEMPERATURE_PATTERN", r"^(gpt-6|o\d)"), re.I)
 
-# Fast/cheap model for final aggregation (falls back to extract model if not set)
-_aggregate_llm = AzureChatOpenAI(
-    azure_deployment=os.getenv("AZURE_OPENAI_AGGREGATE_DEPLOYMENT"),
-    api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-    temperature=0.0,
-    timeout=120,
-)
+
+def _chat_llm(deployment: Optional[str]) -> AzureChatOpenAI:
+    kwargs = {} if _NO_TEMPERATURE.search(deployment or "") else {"temperature": 0.0}
+    return AzureChatOpenAI(
+        azure_deployment=deployment,
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        timeout=120,
+        **kwargs,
+    )
+
+
+# Strong model for skills and per-document extraction.
+_extract_llm = _chat_llm(os.getenv("AZURE_OPENAI_EXTRACT_DEPLOYMENT"))
+
+# Model for the final cross-document aggregation.
+_aggregate_llm = _chat_llm(os.getenv("AZURE_OPENAI_AGGREGATE_DEPLOYMENT"))
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
@@ -2561,7 +2573,14 @@ Skriv i Markdown, og gjør svaret lett å lese på et blikk:
 - Ellers: korte avsnitt. Bruk punktlister bare for reelle oppramsinger, og ikke underpunkter.
 - Bruk få overskrifter (##), og bare når svaret har flere tydelige deler. Ikke nummerer overskriftene.
 - Bruk fet skrift sparsomt, ikke på navn og begreper som går igjen.
-- Hold svaret kort: ta med det som besvarer spørsmålet, ikke alt utdragene inneholder."""
+- Hold svaret kort: ta med det som besvarer spørsmålet, ikke alt utdragene inneholder.
+
+HTML-SIDE
+Bare når brukeren uttrykkelig ber om en HTML-side, en nettside, et dashbord, en interaktiv oversikt eller lignende, gjelder dette i stedet for formreglene over:
+- Lever ett komplett, selvstendig HTML-dokument i én kodeblokk som starter med ```html og slutter med ```.
+- Legg all CSS og JavaScript inn i dokumentet. Ikke bruk eksterne ressurser: ingen CDN-er, skrifter, bilder eller kall til nettet — siden vises uten nettilgang.
+- Gjør siden lesbar på både smal og bred skjerm, og behold kildehenvisningene [n] i teksten.
+- Skriv høyst én kort setning utenfor kodeblokken."""
 
 # Appended in samtalemodus: earlier answers cited passages the model no longer sees.
 _SKILL_CHAT_NOTE = """
@@ -2591,6 +2610,9 @@ Svar bare med søket, på samme språk som spørsmålet, uten forklaring."""
 
 SKILL_HISTORY_TURNS = 6          # earlier turns sent to the model
 SKILL_HISTORY_ANSWER_CHARS = 3000
+SKILL_HISTORY_HTML_CHARS = 60000
+# One or more [n] in a row, not directly after a name or bracket (that is indexing).
+_HTML_CITE = re.compile(r"(?<![\w\])])\s*(?:\[\d+(?:\s*[,–-]\s*\d+)*\])+")
 
 
 def _skill_history(raw) -> list:
@@ -2602,9 +2624,20 @@ def _skill_history(raw) -> list:
         if not isinstance(t, dict):
             continue
         q = str(t.get("question") or "").strip()[:1000]
-        a = re.sub(r"\s*\[\d+(?:\s*[,–-]\s*\d+)*\]", "", str(t.get("answer") or "")).strip()
+        a = str(t.get("answer") or "")
+        if re.search(r"```html|<html[\s>]|<!doctype html", a, re.I):
+            # An HTML page is kept whole, so "gjør tabellen smalere" has the page
+            # to change. Its scripts are left alone, and so is anything that
+            # reads as code (items[0]) rather than a citation.
+            parts = re.split(r"(<script\b[\s\S]*?</script>)", a, flags=re.I)
+            a = "".join(p if i % 2 else _HTML_CITE.sub("", p) for i, p in enumerate(parts))
+            limit = SKILL_HISTORY_HTML_CHARS
+        else:
+            a = re.sub(r"\s*\[\d+(?:\s*[,–-]\s*\d+)*\]", "", a)
+            limit = SKILL_HISTORY_ANSWER_CHARS
+        a = a.strip()
         if q and a:
-            turns.append((q, a[:SKILL_HISTORY_ANSWER_CHARS]))
+            turns.append((q, a[:limit]))
     return turns
 
 
