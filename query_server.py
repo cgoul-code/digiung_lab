@@ -2553,7 +2553,15 @@ Du får utdrag fra dokumentbanken, nummerert [1], [2] osv. De er det eneste kunn
 - Bygg svaret på utdragene. Vis til kilden med nummeret i hakeparentes, f.eks. [2], rett etter det den støtter.
 - Ikke oppgi titler, sidetall, lenker eller sitater som ikke står i utdragene. Lenker til kildene legges på automatisk.
 - Hvis utdragene ikke er nok til å svare, eller bare dekker deler av spørsmålet, si det tydelig.
-- Skriv svaret i Markdown: overskrifter med ##, punktlister med -."""
+
+FORM PÅ SVARET
+Skriv i Markdown, og gjør svaret lett å lese på et blikk:
+- Start med et kort, direkte svar på én til to setninger, uten overskrift over.
+- Sammenligner du to eller flere ting, bruk en Markdown-tabell: én kolonne per ting, én rad per forhold, korte celler. Kildehenvisningene [n] står i cellene.
+- Ellers: korte avsnitt. Bruk punktlister bare for reelle oppramsinger, og ikke underpunkter.
+- Bruk få overskrifter (##), og bare når svaret har flere tydelige deler. Ikke nummerer overskriftene.
+- Bruk fet skrift sparsomt, ikke på navn og begreper som går igjen.
+- Hold svaret kort: ta med det som besvarer spørsmålet, ikke alt utdragene inneholder."""
 
 # Appended in samtalemodus: earlier answers cited passages the model no longer sees.
 _SKILL_CHAT_NOTE = """
