@@ -2577,6 +2577,7 @@ _SKILL_DIALOG_NOTE = """
 DIALOG
 Du fører en dialog med brukeren, og kan stille spørsmål tilbake.
 - Hvis spørsmålet er uklart, for vidt, eller kan forstås på flere måter som ville gitt ulike svar: still ett til tre korte, konkrete oppklarende spørsmål i stedet for å gjette. Gi da ikke et fullt svar i samme melding.
+- Hvis et godt svar avhenger av opplysninger bare brukeren har (f.eks. hvem det gjelder, alder, rolle, tidsrom, hvilken løsning eller situasjon), og de ikke er oppgitt: spør etter akkurat de opplysningene før du svarer. Er det bare en mindre del som avhenger av dem, svar på resten og spør om det som mangler til slutt.
 - Er spørsmålet klart nok, svar direkte. Ikke spør om noe som allerede fremgår av samtalen, og ikke spør mer enn nødvendig.
 - Når brukeren svarer på et spørsmål du har stilt, bruk svaret sammen med det opprinnelige spørsmålet og svar på saken.
 - Hvis søket ikke ga noen utdrag, si det kort og spør hva brukeren er ute etter, eller foreslå hvordan spørsmålet kan presiseres.
